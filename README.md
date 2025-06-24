@@ -6,10 +6,8 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![ComfyUI](https://img.shields.io/badge/ComfyUI-Compatible-brightgreen.svg)](https://github.com/comfyanonymous/ComfyUI)
 
-> [!TIP]
-> **Disclaimer**: I'm obviously joking about the "$1000+ plugin" claims and competing with Photoshop - this is a ComfyUI custom node, not industry software! 😄 
-> 
-> **BUT** it does have legit AI-powered features, face detection, and professional color science. And hey, it beats paying Adobe! 💰
+> [!NOTE]
+> **Disclaimer**: I'm obviously joking about the "$1000+ plugin" claims and competing with Photoshop - this is a ComfyUI custom node, not industry software! 😄 **BUT** it does have legit AI-powered features, face detection, and professional color science. And hey, it beats paying Adobe! 💰
 
 ---
 
@@ -27,6 +25,8 @@
 - **🎛️ Three Modes**: Auto (AI magic), Preset (curated looks), Manual (full control)
 
 ---
+
+![alt text](screen.png)
 
 ## ✨ Key Features
 
