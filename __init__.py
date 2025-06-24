@@ -9,7 +9,7 @@ NODE_CLASS_MAPPINGS = {
     "EasyColorCorrection": EasyColorCorrection,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "EasyColorCorrection": "ComfyUI-EasyColorCorrection",
+    "EasyColorCorrection": "Color Corrector",
 }
 
 __all__ = [

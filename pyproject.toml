@@ -19,5 +19,5 @@ Repository = "https://github.com/regiellis/ComfyUI-EasyColorCorrector"
 
 [tool.comfy]
 PublisherId = "itsjustregi"
-DisplayName = "ComfyUI-EasyColorCorrection"
+DisplayName = "Easy Color Correction"
 Icon = ""
