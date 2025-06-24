@@ -1,0 +1,19 @@
+# pyproject.tom
+[project]
+name = "ComfyUI-EasyColorCorrection"
+authors = ["Regi E."]
+description = "ComfyUI custom node for flexible and efficient image color correction and post-processing."
+version = "1.0.0"
+
+license = {text = "MIT"}
+dependencies  = [
+    "torch>=1.12.0",
+    "numpy>=1.21.0"
+]
+[project.urls]
+Repository = ""
+
+[tool.comfy]
+PublisherId = "itsjustregi"
+DisplayName = "ComfyUI-EasyColorCorrection"
+Icon = ""
