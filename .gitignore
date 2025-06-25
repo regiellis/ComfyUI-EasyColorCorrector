@@ -26,4 +26,6 @@ results
 backup
 .python-version
 node.zip
-
+CLAUDE.md
+.claude
+last_session.yaml

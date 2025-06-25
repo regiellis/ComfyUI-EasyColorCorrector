@@ -20,6 +20,30 @@ except ImportError as e:
     print(f"EasyColorCorrection: Advanced features disabled - missing library: {e}")
     ADVANCED_LIBS_AVAILABLE = False
 
+# RAW IMAGE PROCESSING
+try:
+    import rawpy
+    RAW_PROCESSING_AVAILABLE = True
+except ImportError as e:
+    print(f"EasyColorCorrection: RAW processing disabled - missing rawpy library: {e}")
+    RAW_PROCESSING_AVAILABLE = False
+
+# HDR/EXR IMAGE PROCESSING
+try:
+    import OpenEXR
+    import Imath
+    EXR_PROCESSING_AVAILABLE = True
+except ImportError as e:
+    print(f"EasyColorCorrection: EXR processing disabled - missing OpenEXR library: {e}")
+    EXR_PROCESSING_AVAILABLE = False
+
+try:
+    import imageio
+    IMAGEIO_AVAILABLE = True
+except ImportError as e:
+    print(f"EasyColorCorrection: Extended format support disabled - missing imageio library: {e}")
+    IMAGEIO_AVAILABLE = False
+
 
 # --- Helper functions for color space conversion ---
 def rgb_to_hsv(rgb: torch.Tensor) -> torch.Tensor:
@@ -214,6 +238,12 @@ def match_to_reference_colors(
         return image_np
 
 
+def get_preferred_device(use_gpu: bool = True):
+    """Get the preferred device considering user settings."""
+    if not use_gpu:
+        return torch.device("cpu")
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 def analyze_image_content(
     image_np: np.ndarray, device: torch.device = None
 ) -> typing.Dict[str, typing.Any]:
@@ -229,7 +259,7 @@ def analyze_image_content(
     analysis = {}
 
     if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = get_preferred_device()
     try:
         gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
         face_cascade = cv2.CascadeClassifier(
@@ -397,7 +427,12 @@ def edge_aware_enhancement(image_np: np.ndarray, strength: float = 0.5) -> np.nd
 def intelligent_white_balance(
     image_np: np.ndarray, strength: float = 0.6
 ) -> np.ndarray:
-    """Advanced white balance using professional color science."""
+    """Advanced white balance using professional color science.
+    
+    Args:
+        strength: -1.0 to 1.0, where negative values enhance cool/blue tones,
+                 positive values enhance warm/orange tones, 0.0 = neutral
+    """
     if not ADVANCED_LIBS_AVAILABLE:
         return image_np
 
@@ -407,11 +442,23 @@ def intelligent_white_balance(
         a_channel = lab[:, :, 1].astype(np.float32) - 128
         b_channel = lab[:, :, 2].astype(np.float32) - 128
 
-        a_shift = np.median(a_channel)
-        b_shift = np.median(b_channel)
-
-        lab[:, :, 1] = np.clip(lab[:, :, 1] - a_shift * strength, 0, 255)
-        lab[:, :, 2] = np.clip(lab[:, :, 2] - b_shift * strength, 0, 255)
+        if strength >= 0.0:
+            # Positive strength: traditional white balance (focus on temperature)
+            a_shift = np.median(a_channel)
+            b_shift = np.median(b_channel)
+            # Reduce tint influence since we have separate tint control
+            lab[:, :, 1] = np.clip(lab[:, :, 1] - a_shift * strength * 0.3, 0, 255)  # Reduced tint correction
+            lab[:, :, 2] = np.clip(lab[:, :, 2] - b_shift * strength, 0, 255)        # Full temperature correction
+        else:
+            # Negative strength: enhance cool tones (blue/cyan)
+            abs_strength = abs(strength)
+            # Focus primarily on b channel (temperature) for cool adjustment
+            cool_b_shift = -25 * abs_strength  # Toward blue (cooler temperature)
+            # Minimal a channel adjustment since we have separate tint control
+            cool_a_shift = -5 * abs_strength   # Slight toward green (cooler)
+            
+            lab[:, :, 1] = np.clip(lab[:, :, 1] + cool_a_shift, 0, 255)
+            lab[:, :, 2] = np.clip(lab[:, :, 2] + cool_b_shift, 0, 255)
 
         corrected = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
 
@@ -594,7 +641,7 @@ def enhance_faces(
                     strength * 0.18,
                     np.where(
                         very_light_skin,
-                        strength * 0.08,
+                        0.0,  # No green reduction for very light skin to avoid green tint
                         strength * 0.12,
                     ),
                 ),
@@ -934,7 +981,7 @@ class EasyColorCorrection:
         return {
             "required": {
                 "image": ("IMAGE", {}),
-                "mode": (["Auto", "Preset", "Manual"], {"default": "Auto"}),
+                "mode": (["Auto", "Preset", "Manual", "Colorize"], {"default": "Auto"}),
             },
             "optional": {
                 "reference_image": (
@@ -984,40 +1031,40 @@ class EasyColorCorrection:
                 "white_balance_strength": (
                     "FLOAT",
                     {
-                        "default": 0.5,
-                        "min": 0.0,
+                        "default": 0.0,
+                        "min": -1.0,
                         "max": 1.0,
-                        "step": 0.10,
-                        "tooltip": "Strength of perceptual LAB-based white balance",
+                        "step": 0.05,
+                        "tooltip": "White balance adjustment: -1.0 = cooler/blue, +1.0 = warmer/orange",
                     },
                 ),
                 "enhancement_strength": (
                     "FLOAT",
                     {
-                        "default": 0.8,
+                        "default": 0.2,
                         "min": 0.0,
-                        "max": 1.5,
-                        "step": 0.10,
+                        "max": 2.5,
+                        "step": 0.05,
                         "tooltip": "Overall strength of AI-powered enhancements",
                     },
                 ),
                 "pop_factor": (
                     "FLOAT",
                     {
-                        "default": 0.30,
+                        "default": 0.7,
                         "min": 0.0,
-                        "max": 1.0,
-                        "step": 0.10,
+                        "max": 2.0,
+                        "step": 0.05,
                         "tooltip": "Extra pop factor for artistic content (anime, detailed photos)",
                     },
                 ),
                 "effect_strength": (
                     "FLOAT",
                     {
-                        "default": 1.0,
+                        "default": 0.6,
                         "min": 0.0,
-                        "max": 2.0,
-                        "step": 0.10,
+                        "max": 3.0,
+                        "step": 0.05,
                         "tooltip": "Strength of overall color correction effect",
                     },
                 ),
@@ -1025,9 +1072,9 @@ class EasyColorCorrection:
                     "FLOAT",
                     {
                         "default": 0.0,
-                        "min": -1.0,
-                        "max": 1.0,
-                        "step": 0.10,
+                        "min": -2.0,
+                        "max": 2.0,
+                        "step": 0.05,
                         "tooltip": "Green/Magenta warmth adjustment",
                     },
                 ),
@@ -1037,7 +1084,7 @@ class EasyColorCorrection:
                         "default": 0.0,
                         "min": -1.0,
                         "max": 1.0,
-                        "step": 0.10,
+                        "step": 0.05,
                         "tooltip": "Saturation boost for less saturated areas",
                     },
                 ),
@@ -1045,9 +1092,9 @@ class EasyColorCorrection:
                     "FLOAT",
                     {
                         "default": 0.0,
-                        "min": -1.0,
-                        "max": 1.0,
-                        "step": 0.10,
+                        "min": -0.5,
+                        "max": 0.5,
+                        "step": 0.02,
                         "tooltip": "Contrast adjustment for overall image",
                     },
                 ),
@@ -1055,10 +1102,20 @@ class EasyColorCorrection:
                     "FLOAT",
                     {
                         "default": 0.0,
+                        "min": -0.5,
+                        "max": 0.5,
+                        "step": 0.02,
+                        "tooltip": "Brightness adjustment for overall image",
+                    },
+                ),
+                "tint": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
                         "min": -1.0,
                         "max": 1.0,
-                        "step": 0.10,
-                        "tooltip": "Brightness adjustment for overall image",
+                        "step": 0.05,
+                        "tooltip": "Tint adjustment: -1.0 = green, +1.0 = magenta (Manual mode only)",
                     },
                 ),
                 "preset": (list(cls.PRESETS.keys()), {}),
@@ -1112,6 +1169,71 @@ class EasyColorCorrection:
                         "tooltip": "Noise reduction strength (0.0 = no noise reduction, 1.0 = maximum noise reduction)",
                     },
                 ),
+                # Colorize mode specific parameters
+                "colorize_strength": (
+                    "FLOAT",
+                    {
+                        "default": 0.8,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.10,
+                        "tooltip": "🎨 Overall colorization strength (only for photos, not art/anime)",
+                    },
+                ),
+                "skin_warmth": (
+                    "FLOAT",
+                    {
+                        "default": 0.3,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.10,
+                        "tooltip": "🧑 Warmth applied to detected skin tones",
+                    },
+                ),
+                "sky_saturation": (
+                    "FLOAT",
+                    {
+                        "default": 0.6,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.10,
+                        "tooltip": "🌅 Saturation boost for sky and blue regions",
+                    },
+                ),
+                "vegetation_green": (
+                    "FLOAT",
+                    {
+                        "default": 0.5,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.10,
+                        "tooltip": "🌿 Green enhancement for vegetation and foliage",
+                    },
+                ),
+                "sepia_tone": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.10,
+                        "tooltip": "🟤 Sepia tone blend for vintage photo colorization",
+                    },
+                ),
+                "colorize_mode": (
+                    ["auto", "portrait", "landscape", "vintage"],
+                    {
+                        "default": "auto",
+                        "tooltip": "🎯 Colorization style: auto-detect, portrait focus, landscape focus, or vintage look",
+                    },
+                ),
+                "use_gpu": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "🚀 Use GPU acceleration for processing (disable to force CPU)",
+                    },
+                ),
                 "mask": ("MASK", {}),
             },
         }
@@ -1132,39 +1254,94 @@ class EasyColorCorrection:
         realtime_preview: bool = False,
         ai_analysis: bool = True,
         adjust_for_skin_tone: bool = False,
-        white_balance_strength: float = 0.6,
-        enhancement_strength: float = 0.8,
+        white_balance_strength: float = 0.0,
+        enhancement_strength: float = 0.2,
         pop_factor: float = 0.7,
-        effect_strength: float = 1.0,
+        effect_strength: float = 0.6,
         warmth: float = 0.0,
         vibrancy: float = 0.0,
         contrast: float = 0.0,
         brightness: float = 0.0,
+        tint: float = 0.0,
         preset: str = "Anime",
         variation: float = 0.0,
         lift: float = 0.0,
         gamma: float = 0.0,
         gain: float = 0.0,
         noise: float = 0.0,
+        colorize_strength: float = 0.8,
+        skin_warmth: float = 0.3,
+        sky_saturation: float = 0.6,
+        vegetation_green: float = 0.5,
+        sepia_tone: float = 0.0,
+        colorize_mode: str = "auto",
+        use_gpu: bool = True,
         mask: typing.Optional[torch.Tensor] = None,
     ) -> tuple:
-
-        _ = realtime_preview
 
         original_image = image.clone()
         _, height, width, _ = image.shape
 
-        processed_image = image.clone()
+        # Cache for realtime preview - avoid reprocessing upstream when enabled
+        if realtime_preview:
+            # Check if the input image has changed (cache invalidation)
+            image_changed = False
+            if not hasattr(self, '_cached_original_image') or self._cached_original_image is None:
+                image_changed = True
+            else:
+                # Compare image tensors to detect changes from upstream
+                try:
+                    if not torch.equal(self._cached_original_image, original_image):
+                        image_changed = True
+                except:
+                    # Different shapes or other comparison issues = definitely changed
+                    image_changed = True
+            
+            if image_changed:
+                self._cached_original_image = original_image.clone()
+                self._cached_analysis = None
+                print("🔄 Realtime Preview: New image detected, updating cache")
+            
+            processed_image = self._cached_original_image.clone()
+        else:
+            processed_image = image.clone()
+            # Clear cache when not in realtime mode
+            if hasattr(self, '_cached_original_image'):
+                self._cached_original_image = None
+                self._cached_analysis = None
+
+        # --- SHARED AI ANALYSIS (available to all modes) ---
+        # Always create image_np for potential use in processing functions
+        image_np = (processed_image[0].cpu().numpy() * 255).astype(np.uint8)
+        
+        analysis = None
+        if ai_analysis and ADVANCED_LIBS_AVAILABLE:
+            # Use cached analysis in realtime preview mode
+            if realtime_preview and hasattr(self, '_cached_analysis') and self._cached_analysis is not None:
+                analysis = self._cached_analysis
+            else:
+                analysis = analyze_image_content(image_np, get_preferred_device(use_gpu))
+                if realtime_preview:
+                    self._cached_analysis = analysis
+                    
+            print(
+                f"🤖 AI Analysis{'(cached)' if realtime_preview and hasattr(self, '_cached_analysis') else ''} for {mode} Mode: {analysis['scene_type']} scene, {analysis['lighting']} lighting, {len(analysis['faces'])} faces detected"
+            )
+        else:
+            # Provide fallback analysis for non-AI modes
+            analysis = {
+                "scene_type": "general",
+                "lighting": "auto",
+                "faces": [],
+                "dominant_colors": [],
+            }
+            if not ai_analysis:
+                print(f"🔧 {mode} Mode: AI analysis disabled, using fallback values")
 
         # --- AUTO MODE ---
         if mode == "Auto":
             if ai_analysis and ADVANCED_LIBS_AVAILABLE:
-                image_np = (processed_image[0].cpu().numpy() * 255).astype(np.uint8)
-                analysis = analyze_image_content(image_np, processed_image.device)
-                print(
-                    f"🤖 AI Analysis: {analysis['scene_type']} scene, {analysis['lighting']} lighting, {len(analysis['faces'])} faces detected"
-                )
-                if white_balance_strength > 0.0:
+                if white_balance_strength != 0.0:
                     wb_corrected = intelligent_white_balance(
                         image_np, white_balance_strength
                     )
@@ -1201,26 +1378,38 @@ class EasyColorCorrection:
                     "dominant_colors": [],
                 }
                 print("🔧 Basic Auto Mode: AI analysis disabled")
-                if white_balance_strength > 0.0:
+                if white_balance_strength != 0.0:
                     B, C = processed_image.shape[0], processed_image.shape[3]
-                    flat_image = processed_image.view(B, -1, C)
-                    percentile_40 = torch.quantile(
-                        flat_image, 0.40, dim=1, keepdim=True
-                    )
-                    percentile_60 = torch.quantile(
-                        flat_image, 0.60, dim=1, keepdim=True
-                    )
-                    midtone_mean = (percentile_40 + percentile_60) / 2.0
-                    avg_gray = torch.mean(midtone_mean, dim=-1, keepdim=True)
-                    scale = avg_gray / (midtone_mean + 1e-6)
-                    scale = torch.lerp(
-                        torch.ones_like(scale), scale, white_balance_strength
-                    )
-                    scale = scale.view(B, 1, 1, C)
-                    color_deviation = torch.abs(scale - 1.0).max()
-                    if color_deviation > 0.05:
-                        processed_image = processed_image * scale
-                        processed_image = torch.clamp(processed_image, 0.0, 1.0)
+                    
+                    if white_balance_strength > 0.0:
+                        # Positive: traditional white balance (neutralize)
+                        flat_image = processed_image.view(B, -1, C)
+                        percentile_40 = torch.quantile(
+                            flat_image, 0.40, dim=1, keepdim=True
+                        )
+                        percentile_60 = torch.quantile(
+                            flat_image, 0.60, dim=1, keepdim=True
+                        )
+                        midtone_mean = (percentile_40 + percentile_60) / 2.0
+                        avg_gray = torch.mean(midtone_mean, dim=-1, keepdim=True)
+                        scale = avg_gray / (midtone_mean + 1e-6)
+                        scale = torch.lerp(
+                            torch.ones_like(scale), scale, white_balance_strength
+                        )
+                        scale = scale.view(B, 1, 1, C)
+                        color_deviation = torch.abs(scale - 1.0).max()
+                        if color_deviation > 0.05:
+                            processed_image = processed_image * scale
+                    else:
+                        # Negative: enhance cool tones (shift toward blue)
+                        abs_strength = abs(white_balance_strength)
+                        # Cool shift: reduce red, enhance blue
+                        cool_scale = torch.tensor([0.95, 1.0, 1.08], device=processed_image.device, dtype=processed_image.dtype)
+                        cool_scale = torch.lerp(torch.ones_like(cool_scale), cool_scale, abs_strength)
+                        cool_scale = cool_scale.view(1, 1, 1, 3)
+                        processed_image = processed_image * cool_scale
+                    
+                    processed_image = torch.clamp(processed_image, 0.0, 1.0)
             hsv_enhanced = rgb_to_hsv(processed_image)
             h_enh, s_enh, v_enh = (
                 hsv_enhanced[..., 0],
@@ -1306,17 +1495,8 @@ class EasyColorCorrection:
             processed_image = hsv_to_rgb(torch.stack([h_enh, s_enh, v_enh], dim=-1))
             processed_image = torch.clamp(processed_image, 0.0, 1.0)
 
-        # --- SHARED AI ANALYSIS ---
-        analysis = None
-        if ai_analysis and ADVANCED_LIBS_AVAILABLE:
-            image_np = (processed_image[0].cpu().numpy() * 255).astype(np.uint8)
-            analysis = analyze_image_content(image_np, processed_image.device)
-            print(
-                f"🤖 AI Analysis for {mode} Mode: {analysis['scene_type']} scene, {analysis['lighting']} lighting, {len(analysis['faces'])} faces detected"
-            )
-
         # --- PRESET MODE ---
-        elif mode == "Preset":
+        if mode == "Preset":
             p_vals = self.PRESETS.get(
                 preset, {}
             ).copy()
@@ -1371,18 +1551,20 @@ class EasyColorCorrection:
             else:
                 v_factor = variation * 0.05
 
-            # Apply preset values with intelligent variation
-            warmth = p_vals.get("warmth", 0.0) + (torch.randn(1).item() * v_factor)
-            vibrancy = p_vals.get("vibrancy", 0.0) + (torch.randn(1).item() * v_factor)
-            contrast = p_vals.get("contrast", 0.0) + (torch.randn(1).item() * v_factor)
-            brightness = p_vals.get("brightness", 0.0) + (
-                torch.randn(1).item() * v_factor
-            )
+            # Apply preset values with intelligent variation (only for Preset mode)
+            if mode == "Preset":
+                warmth = p_vals.get("warmth", 0.0) + (torch.randn(1).item() * v_factor)
+                vibrancy = p_vals.get("vibrancy", 0.0) + (torch.randn(1).item() * v_factor)
+                contrast = p_vals.get("contrast", 0.0) + (torch.randn(1).item() * v_factor)
+                brightness = p_vals.get("brightness", 0.0) + (
+                    torch.randn(1).item() * v_factor
+                )
+            # For Manual mode, use the direct parameter values (warmth, vibrancy, contrast, brightness are already set as function parameters)
 
         # --- ADVANCED COLOR PROCESSING (Preset and Manual modes) ---
         if mode != "Auto":
             # === INTELLIGENT WHITE BALANCE (if enabled) ===
-            if white_balance_strength > 0.0 and ai_analysis and ADVANCED_LIBS_AVAILABLE:
+            if white_balance_strength != 0.0 and ai_analysis and ADVANCED_LIBS_AVAILABLE:
                 wb_corrected = intelligent_white_balance(
                     image_np, white_balance_strength
                 )
@@ -1411,8 +1593,8 @@ class EasyColorCorrection:
             hsv_image = rgb_to_hsv(processed_image)
             h, s, v = hsv_image[..., 0], hsv_image[..., 1], hsv_image[..., 2]
 
-            if warmth != 0.0:
-                h = (h + warmth * 0.1) % 1.0
+            # Warmth will be handled in LAB color space later for proper temperature control
+            # (removing the simple hue shift approach)
 
             if vibrancy != 0.0:
                 saturation_mask = 1.0 - s
@@ -1423,6 +1605,52 @@ class EasyColorCorrection:
 
             if contrast != 0.0:
                 v = 0.5 + (v - 0.5) * (1.0 + contrast)
+
+            processed_image = hsv_to_rgb(torch.stack([h, s, v], dim=-1))
+            processed_image = torch.clamp(processed_image, 0.0, 1.0)
+
+            # === TEMPERATURE & TINT PROCESSING (LAB color space) ===
+            if (warmth != 0.0 or tint != 0.0) and mode == "Manual":
+                # Convert to numpy for LAB processing
+                image_np_for_color = (processed_image[0].cpu().numpy() * 255).astype(np.uint8)
+                
+                if ADVANCED_LIBS_AVAILABLE:
+                    try:
+                        # Convert to LAB color space
+                        lab = cv2.cvtColor(image_np_for_color, cv2.COLOR_RGB2LAB)
+                        
+                        # Apply temperature adjustment to 'b' channel (blue-yellow axis)
+                        if warmth != 0.0:
+                            # 'b' channel: values around 128 are neutral, <128 is blue, >128 is yellow
+                            temperature_shift = warmth * 35  # Scale factor for visible temperature effect
+                            lab[:, :, 2] = np.clip(lab[:, :, 2] + temperature_shift, 0, 255)
+                        
+                        # Apply tint adjustment to 'a' channel (green-magenta axis)
+                        if tint != 0.0:
+                            # 'a' channel: values around 128 are neutral, <128 is green, >128 is magenta
+                            tint_shift = tint * 30  # Scale factor for visible tint effect
+                            lab[:, :, 1] = np.clip(lab[:, :, 1] + tint_shift, 0, 255)
+                        
+                        # Convert back to RGB
+                        color_corrected_rgb = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+                        processed_image = (
+                            torch.from_numpy(color_corrected_rgb.astype(np.float32) / 255.0)
+                            .unsqueeze(0)
+                            .to(processed_image.device)
+                        )
+                        processed_image = torch.clamp(processed_image, 0.0, 1.0)
+                        
+                        adjustments = []
+                        if warmth != 0.0:
+                            adjustments.append(f"temperature: {warmth:.2f} ({'warmer' if warmth > 0 else 'cooler'})")
+                        if tint != 0.0:
+                            adjustments.append(f"tint: {tint:.2f} ({'magenta' if tint > 0 else 'green'})")
+                        print(f"🌡️ Applied professional color adjustments: {', '.join(adjustments)}")
+                        
+                    except Exception as e:
+                        print(f"⚠️ Temperature/tint processing failed, using original: {e}")
+                else:
+                    print("⚠️ Professional temperature/tint requires advanced libraries (OpenCV), skipping")
 
             # --- MANUAL MODE ---
             if mode == "Manual":
@@ -1458,37 +1686,21 @@ class EasyColorCorrection:
                     midtones_mask = 1.0 - torch.abs(v - 0.5) * 2.0
                     highlights_mask = torch.clamp((v - 0.66) * 3.0, 0.0, 1.0)
 
+                # === 3-WAY COLOR CORRECTION (Lift/Gamma/Gain) ===
                 if lift != 0.0:
-                    if analysis and analysis["scene_type"] in [
-                        "concept_art",
-                        "anime",
-                        "stylized_art",
-                    ]:
-                        lift_strength = 0.5
-                    else:
-                        lift_strength = 0.4
+                    # Shadows (lift) - reduced strength for better control
+                    lift_strength = 0.3  # Reduced from 0.4-0.5 for more subtle control
                     v = v + (lift * lift_strength * shadows_mask)
 
                 if gamma != 0.0:
-                    if analysis and analysis["scene_type"] in [
-                        "concept_art",
-                        "detailed_illustration",
-                    ]:
-                        gamma_exp = 1.0 / (1.0 + gamma * 1.0)
-                    else:
-                        gamma_exp = 1.0 / (1.0 + gamma * 0.8)
+                    # Midtones (gamma) - reduced strength for better control
+                    gamma_exp = 1.0 / (1.0 + gamma * 0.6)  # Reduced from 0.8-1.0 for more subtle control
                     v_gamma = torch.pow(torch.clamp(v, 0.001, 1.0), gamma_exp)
                     v = torch.lerp(v, v_gamma, midtones_mask)
 
                 if gain != 0.0:
-                    if analysis and analysis["scene_type"] in [
-                        "concept_art",
-                        "anime",
-                        "stylized_art",
-                    ]:
-                        gain_strength = 0.5
-                    else:
-                        gain_strength = 0.4
+                    # Highlights (gain) - reduced strength for better control
+                    gain_strength = 0.3  # Reduced from 0.4-0.5 for more subtle control
                     v = v + (gain * gain_strength * highlights_mask)
 
                 if noise > 0.0:
@@ -1504,6 +1716,30 @@ class EasyColorCorrection:
 
                     hsv_temp = rgb_to_hsv(rgb_temp)
                     h, s, v = hsv_temp[..., 0], hsv_temp[..., 1], hsv_temp[..., 2]
+
+        # --- COLORIZE MODE ---
+        elif mode == "Colorize":
+            # Smart detection to avoid colorizing art/anime
+            if analysis:
+                scene_type = analysis["scene_type"]
+                if scene_type in ["anime", "concept_art", "stylized_art", "detailed_illustration"]:
+                    print(f"🚫 Colorize Mode: Skipping colorization for {scene_type} content")
+                    # Return original image for art content
+                    processed_image = original_image.clone()
+                else:
+                    print(f"🎨 Colorize Mode: Processing {scene_type} for intelligent colorization")
+                    processed_image = self._apply_colorization(
+                        original_image, processed_image, analysis,
+                        colorize_strength, skin_warmth, sky_saturation, 
+                        vegetation_green, sepia_tone, colorize_mode
+                    )
+            else:
+                print("🎨 Colorize Mode: Applying general colorization (no AI analysis)")
+                processed_image = self._apply_colorization(
+                    original_image, processed_image, None,
+                    colorize_strength, skin_warmth, sky_saturation, 
+                    vegetation_green, sepia_tone, colorize_mode
+                )
 
             # --- SKIN TONE PROTECTION ---
             if analysis and analysis["faces"] and adjust_for_skin_tone:
@@ -1619,3 +1855,1115 @@ class EasyColorCorrection:
             )
 
         return (processed_image, palette_data, histogram_tensor, palette_image_tensor)
+
+    def _apply_colorization(self, original_image, processed_image, analysis, 
+                           colorize_strength, skin_warmth, sky_saturation, 
+                           vegetation_green, sepia_tone, colorize_mode):
+        """
+        Apply intelligent colorization to grayscale or desaturated photos.
+        Uses GPU-optimized tensor operations for efficient processing.
+        """
+        device = original_image.device
+        
+        # Convert to HSV for color manipulation
+        hsv_image = rgb_to_hsv(processed_image)
+        h, s, v = hsv_image[..., 0], hsv_image[..., 1], hsv_image[..., 2]
+        
+        # Check if image is grayscale or very desaturated
+        avg_saturation = torch.mean(s).item()
+        if avg_saturation > 0.3:
+            print(f"⚠️ Image already has color (avg saturation: {avg_saturation:.2f}), applying gentle enhancement")
+            colorize_strength *= 0.3  # Reduce strength for already colored images
+        
+        # Create region masks based on luminance and edge detection
+        luminance = torch.mean(processed_image, dim=-1, keepdim=True)
+        
+        # Sky detection (upper regions with high luminance)
+        height = processed_image.shape[1]
+        sky_region = torch.zeros_like(luminance, device=device)
+        sky_upper_third = height // 3
+        sky_region[:, :sky_upper_third, :, :] = 1.0
+        
+        # Enhance sky detection with luminance
+        sky_luminance_mask = (luminance > 0.7).float()
+        sky_mask = sky_region * sky_luminance_mask
+        
+        # Vegetation detection (mid-luminance areas, typically green regions)
+        vegetation_mask = ((luminance > 0.2) & (luminance < 0.8)).float()
+        vegetation_mask = vegetation_mask * (1.0 - sky_mask)  # Exclude sky areas
+        
+        # Skin tone detection (mid-luminance warm areas)
+        skin_mask = torch.zeros_like(luminance, device=device)
+        if analysis and analysis.get("faces"):
+            # Use luminance-based approximation for skin areas
+            skin_mask = ((luminance > 0.25) & (luminance < 0.85)).float()
+            skin_mask = skin_mask * (1.0 - sky_mask) * (1.0 - vegetation_mask)
+        
+        # Apply colorization based on mode
+        if colorize_mode == "vintage":
+            # Vintage sepia-toned colorization
+            base_hue = 0.08  # Warm sepia hue
+            h = torch.full_like(h, base_hue)
+            s = s + sepia_tone * 0.4 * colorize_strength
+            
+        elif colorize_mode == "portrait":
+            # Portrait-focused colorization
+            # Warm skin tones
+            skin_hue = 0.08  # Warm skin hue
+            h = torch.where(skin_mask > 0.3, skin_hue, h)
+            s = torch.where(skin_mask > 0.3, s + skin_warmth * colorize_strength, s)
+            
+            # Subtle sky blues
+            sky_hue = 0.58  # Blue hue
+            h = torch.where(sky_mask > 0.5, sky_hue, h)
+            s = torch.where(sky_mask > 0.5, s + sky_saturation * 0.3 * colorize_strength, s)
+            
+        elif colorize_mode == "landscape":
+            # Landscape-focused colorization
+            # Green vegetation
+            vegetation_hue = 0.25  # Green hue
+            h = torch.where(vegetation_mask > 0.4, vegetation_hue, h)
+            s = torch.where(vegetation_mask > 0.4, s + vegetation_green * colorize_strength, s)
+            
+            # Blue skies
+            sky_hue = 0.58  # Blue hue
+            h = torch.where(sky_mask > 0.5, sky_hue, h)
+            s = torch.where(sky_mask > 0.5, s + sky_saturation * colorize_strength, s)
+            
+        else:  # auto mode
+            # Intelligent auto colorization
+            # Sky areas -> blue
+            sky_hue = 0.58
+            h = torch.where(sky_mask > 0.5, sky_hue, h)
+            s = torch.where(sky_mask > 0.5, s + sky_saturation * colorize_strength, s)
+            
+            # Vegetation areas -> green
+            vegetation_hue = 0.25
+            h = torch.where(vegetation_mask > 0.4, vegetation_hue, h)
+            s = torch.where(vegetation_mask > 0.4, s + vegetation_green * colorize_strength, s)
+            
+            # Skin areas -> warm tones
+            if torch.sum(skin_mask) > 0:
+                skin_hue = 0.08
+                h = torch.where(skin_mask > 0.3, skin_hue, h)
+                s = torch.where(skin_mask > 0.3, s + skin_warmth * colorize_strength, s)
+        
+        # Apply sepia tone if specified
+        if sepia_tone > 0:
+            sepia_hue = 0.08  # Warm sepia
+            h = torch.lerp(h, torch.full_like(h, sepia_hue), sepia_tone)
+            s = s + sepia_tone * 0.3
+        
+        # Ensure values stay in valid range
+        h = h % 1.0  # Wrap hue
+        s = torch.clamp(s, 0.0, 1.0)
+        v = torch.clamp(v, 0.0, 1.0)
+        
+        # Convert back to RGB
+        colorized_hsv = torch.stack([h, s, v], dim=-1)
+        colorized_rgb = hsv_to_rgb(colorized_hsv)
+        
+        # Blend with original based on colorize_strength
+        final_image = torch.lerp(processed_image, colorized_rgb, colorize_strength)
+        
+        return torch.clamp(final_image, 0.0, 1.0)
+
+
+class BatchColorCorrection:
+    """
+    Batch Color Correction node for processing video frame sequences from VHS upload nodes.
+    Processes multiple frames efficiently while maintaining consistency across the sequence.
+    """
+    
+    # Share presets with main EasyColorCorrection class
+    PRESETS = EasyColorCorrection.PRESETS
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "mode": (["Auto", "Preset", "Manual"], {"default": "Auto"}),
+                "frames_per_batch": ("INT", {"default": 16, "min": 1, "max": 64, "step": 1}),
+                "use_gpu": ("BOOLEAN", {"default": False, "tooltip": "⚠️ GPU: Faster processing but uses significant VRAM (2-8GB+ for large batches). CPU: Slower but uses system RAM instead of VRAM."}),
+            },
+            "optional": {
+                "ai_analysis": ("BOOLEAN", {"default": True}),
+                "preset": (
+                    [
+                        "Natural", "Warm", "Cool", "High Key", "Dramatic",
+                        "Epic Fantasy", "Sci-Fi Chrome", "Dark Fantasy", "Vibrant Concept", "Matte Painting", "Digital Art",
+                        "Anime Bright", "Anime Moody", "Cyberpunk", "Pastel Dreams", "Neon Nights", "Comic Book",
+                        "Cinematic", "Teal & Orange", "Film Noir", "Vintage Film", "Bleach Bypass",
+                        "Golden Hour", "Blue Hour", "Sunny Day", "Overcast",
+                        "Sepia", "Black & White", "Faded", "Moody"
+                    ],
+                    {"default": "Natural"}
+                ),
+                "effect_strength": ("FLOAT", {"default": 0.4, "min": 0.0, "max": 1.0, "step": 0.1}),
+                "enhancement_strength": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.5, "step": 0.1}),
+                "adjust_for_skin_tone": ("BOOLEAN", {"default": True}),
+                "white_balance_strength": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.1}),
+                "warmth": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.1}),
+                "vibrancy": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.1}),
+                "brightness": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.1}),
+                "contrast": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.1}),
+                "lift": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.1}),
+                "gamma": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.1}),
+                "gain": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.1}),
+                "noise": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.1}),
+                "extract_palette": ("BOOLEAN", {"default": False}),
+                "reference_image": ("IMAGE",),
+                "reference_strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.1}),
+                "mask": ("MASK",),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING", "IMAGE", "IMAGE", "INT")
+    RETURN_NAMES = ("images", "palette_data", "histogram", "palette_image", "frame_count")
+    FUNCTION = "batch_color_correct"
+    CATEGORY = "itsjustregi / Easy Color Correction"
+    OUTPUT_NODE = True
+    
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")  # Always update for video previews
+    DISPLAY_NAME = "Batch Color Correction"
+
+    def batch_color_correct(
+        self,
+        images,
+        mode="Auto",
+        frames_per_batch=16,
+        use_gpu=False,
+        ai_analysis=True,
+        preset="Natural",
+        effect_strength=0.4,
+        enhancement_strength=0.8,
+        adjust_for_skin_tone=True,
+        white_balance_strength=0.6,
+        warmth=0.0,
+        vibrancy=0.0,
+        brightness=0.0,
+        contrast=0.0,
+        lift=0.0,
+        gamma=0.0,
+        gain=0.0,
+        noise=0.0,
+        extract_palette=False,
+        reference_image=None,
+        reference_strength=0.5,
+        mask=None,
+    ):
+        """
+        GPU-optimized batch processing for video frame sequences.
+        Processes multiple frames efficiently while keeping tensors on GPU.
+        """
+        
+        # Get batch dimensions and device
+        total_frames = images.shape[0]
+        frame_height = images.shape[1]
+        frame_width = images.shape[2]
+        device = images.device
+        
+        # Debug device and user preferences
+        print(f"🔧 CUDA Available: {torch.cuda.is_available()}")
+        print(f"🔧 User GPU preference: {use_gpu}")
+        print(f"🔧 Initial device: {device}")
+        print(f"🔧 Input tensor device: {images.device} | dtype: {images.dtype}")
+        
+        # Handle GPU processing based on user choice
+        if use_gpu and torch.cuda.is_available():
+            gpu_memory_before = torch.cuda.memory_allocated() / 1024**3  # GB
+            print(f"🚀 GPU Memory Before: {gpu_memory_before:.2f} GB")
+            
+            if not str(device).startswith('cuda'):
+                print("🚀 User enabled GPU - moving tensors to GPU...")
+                images = images.cuda()
+                device = images.device
+                print(f"✅ Images moved to: {device}")
+                if mask is not None:
+                    mask = mask.cuda()
+                    print(f"✅ Mask moved to: {device}")
+            else:
+                print(f"✅ Tensors already on GPU: {device}")
+                
+        elif use_gpu and not torch.cuda.is_available():
+            print("❌ User requested GPU but CUDA not available - falling back to CPU")
+            gpu_memory_before = 0
+            
+        else:
+            print("💻 User selected CPU processing - keeping tensors on CPU")
+            gpu_memory_before = 0
+        
+        print(f"🎬 GPU Batch Color Correction: Processing {total_frames} frames ({frame_width}x{frame_height}) on {device}")
+        print(f"📊 Processing in batches of {frames_per_batch} frames")
+        
+        # Prepare output containers on GPU
+        processed_frames = []
+        all_palette_data = []
+        all_histograms = []
+        all_palette_images = []
+        
+        # Process frames in GPU-optimized batches with interruption support
+        try:
+            for batch_start in range(0, total_frames, frames_per_batch):
+                # Check for interruption requests
+                import comfy.model_management as model_management
+                if model_management.interrupt_processing:
+                    print("🛑 Batch processing interrupted by user")
+                    # Return partially processed results
+                    if processed_frames:
+                        partial_images = torch.cat(processed_frames, dim=0)
+                        partial_count = partial_images.shape[0]
+                        print(f"⚠️ Partial result: {partial_count}/{total_frames} frames processed")
+                        return (partial_images, "", torch.zeros((1, 512, 768, 3), device=device), torch.zeros((1, 120, 600, 3), device=device), partial_count)
+                    else:
+                        return (images, "", torch.zeros((1, 512, 768, 3), device=device), torch.zeros((1, 120, 600, 3), device=device), 0)
+                
+                batch_end = min(batch_start + frames_per_batch, total_frames)
+                
+                print(f"🔄 GPU Processing batch {batch_start//frames_per_batch + 1}/{(total_frames + frames_per_batch - 1)//frames_per_batch}: frames {batch_start}-{batch_end-1}")
+                
+                # Extract current batch - keep on GPU
+                batch_frames = images[batch_start:batch_end]  # Shape: (batch_size, H, W, C)
+                batch_masks = mask[batch_start:batch_end] if mask is not None else None
+                
+                # Process entire batch on GPU using vectorized operations
+                batch_processed = self._process_batch_gpu(
+                    batch_frames=batch_frames,
+                    batch_masks=batch_masks,
+                    mode=mode,
+                    ai_analysis=ai_analysis,
+                    preset=preset,
+                    effect_strength=effect_strength,
+                    warmth=warmth,
+                    vibrancy=vibrancy,
+                    brightness=brightness,
+                    contrast=contrast,
+                    lift=lift,
+                    gamma=gamma,
+                    gain=gain,
+                    noise=noise,
+                    device=device
+                )
+                
+                processed_frames.append(batch_processed)
+                
+                # Only extract palette from middle frame to avoid CPU overhead
+                if extract_palette and batch_start <= total_frames // 2 < batch_end:
+                    middle_frame_idx = (total_frames // 2) - batch_start
+                    middle_frame = batch_processed[middle_frame_idx:middle_frame_idx+1]
+                    
+                    # Generate GPU-based simplified palette without CPU transfer
+                    palette_data = "GPU_BATCH_MODE"  # Simplified for performance
+                    histogram_tensor = torch.zeros((1, 512, 768, 3), device=device)
+                    palette_img_tensor = torch.zeros((1, 120, 600, 3), device=device)
+                        
+                    all_palette_data.append(palette_data)
+                    all_histograms.append(histogram_tensor)
+                    all_palette_images.append(palette_img_tensor)
+                    
+        except KeyboardInterrupt:
+            print("🛑 Batch processing interrupted by KeyboardInterrupt")
+            if processed_frames:
+                partial_images = torch.cat(processed_frames, dim=0)
+                partial_count = partial_images.shape[0]
+                print(f"⚠️ Partial result: {partial_count}/{total_frames} frames processed")
+                return (partial_images, "", torch.zeros((1, 512, 768, 3), device=device), torch.zeros((1, 120, 600, 3), device=device), partial_count)
+            else:
+                return (images, "", torch.zeros((1, 512, 768, 3), device=device), torch.zeros((1, 120, 600, 3), device=device), 0)
+        except Exception as e:
+            print(f"❌ Error during batch processing: {e}")
+            if processed_frames:
+                partial_images = torch.cat(processed_frames, dim=0)
+                partial_count = partial_images.shape[0]
+                print(f"⚠️ Partial result after error: {partial_count}/{total_frames} frames processed")
+                return (partial_images, "", torch.zeros((1, 512, 768, 3), device=device), torch.zeros((1, 120, 600, 3), device=device), partial_count)
+            else:
+                return (images, "", torch.zeros((1, 512, 768, 3), device=device), torch.zeros((1, 120, 600, 3), device=device), 0)
+        
+        # Combine all processed frames on GPU
+        if processed_frames:
+            final_images = torch.cat(processed_frames, dim=0)
+            
+            # Use middle frame data for representation
+            representative_palette = all_palette_data[0] if all_palette_data else ""
+            representative_histogram = all_histograms[0] if all_histograms else torch.zeros((1, 512, 768, 3), device=device)
+            representative_palette_img = all_palette_images[0] if all_palette_images else torch.zeros((1, 120, 600, 3), device=device)
+            
+            # Memory cleanup and final GPU status
+            if use_gpu and torch.cuda.is_available():
+                gpu_memory_after = torch.cuda.memory_allocated(device) / 1024**3  # GB
+                print(f"🚀 GPU Memory After: {gpu_memory_after:.2f} GB (Delta: {gpu_memory_after - gpu_memory_before:.2f} GB)")
+                
+                # Force garbage collection to free memory
+                import gc
+                gc.collect()
+                torch.cuda.empty_cache()
+                
+                gpu_memory_final = torch.cuda.memory_allocated(device) / 1024**3  # GB
+                print(f"🧹 GPU Memory After Cleanup: {gpu_memory_final:.2f} GB")
+            
+            print(f"✅ GPU Batch processing complete: {total_frames} frames processed on {device}")
+            if representative_palette:
+                print(f"🎨 Representative palette: {representative_palette}")
+            
+            return (final_images, representative_palette, representative_histogram, representative_palette_img, total_frames)
+        else:
+            # Fallback if no frames processed
+            return (images, "", torch.zeros((1, 512, 768, 3), device=device), torch.zeros((1, 120, 600, 3), device=device), 0)
+
+    def _process_batch_gpu(
+        self,
+        batch_frames,
+        batch_masks,
+        mode,
+        ai_analysis,
+        preset,
+        effect_strength,
+        warmth,
+        vibrancy,
+        brightness,
+        contrast,
+        lift,
+        gamma,
+        gain,
+        noise,
+        device
+    ):
+        """
+        GPU-optimized batch processing that processes multiple frames simultaneously.
+        """
+        batch_size = batch_frames.shape[0]
+        
+        # Debug GPU utilization in core processing
+        print(f"🔥 Processing batch of {batch_size} frames on {device}")
+        print(f"🎯 Batch tensor device: {batch_frames.device}")
+        print(f"🎛️ Parameters: warmth={warmth}, vibrancy={vibrancy}, brightness={brightness}, contrast={contrast}")
+        
+        # Ensure batch is on correct GPU device
+        if str(batch_frames.device) != str(device):
+            print(f"⚠️ Moving batch from {batch_frames.device} to {device}")
+            batch_frames = batch_frames.to(device)
+            if batch_masks is not None:
+                batch_masks = batch_masks.to(device)
+        
+        original_batch = batch_frames.clone()
+        
+        # Process all frames in batch simultaneously using vectorized operations
+        processed_batch = batch_frames.clone()
+        
+        # AI Analysis (only on first frame to save computation)
+        analysis = None
+        if ai_analysis:
+            # Use GPU-based analysis instead of CPU-heavy OpenCV operations
+            analysis = self._analyze_image_gpu(batch_frames[0], device)
+        
+        # Apply preset modifications if in Preset mode
+        if mode == "Preset":
+            # Map simplified batch preset names to full preset names
+            preset_mapping = {
+                "Natural": "Natural Portrait",
+                "Warm": "Warm Portrait", 
+                "Cool": "Cool Portrait",
+                "High Key": "High Key Portrait",
+                "Dramatic": "Dramatic Portrait"
+            }
+            
+            full_preset_name = preset_mapping.get(preset, preset)
+            if full_preset_name in self.PRESETS:
+                preset_values = self.PRESETS[full_preset_name]
+                warmth += preset_values.get("warmth", 0.0)
+                vibrancy += preset_values.get("vibrancy", 0.0)
+                brightness += preset_values.get("brightness", 0.0)
+                contrast += preset_values.get("contrast", 0.0)
+                print(f"🎨 Applied batch preset: {preset} -> {full_preset_name}")
+            else:
+                print(f"⚠️ Preset '{preset}' not found in PRESETS dictionary")
+            
+            if analysis and analysis["scene_type"] in ["concept_art", "anime", "stylized_art"]:
+                vibrancy *= 1.4
+                contrast *= 1.25
+        
+        # Auto mode specific processing
+        if mode == "Auto":
+            print(f"🤖 Batch Auto Mode: Applying intelligent enhancements to {batch_size} frames")
+            
+            # Apply white balance to entire batch if enabled
+            if white_balance_strength > 0.0:
+                if ai_analysis and ADVANCED_LIBS_AVAILABLE:
+                    # AI-based white balance on first frame, apply to all
+                    first_frame_np = (batch_frames[0].cpu().numpy() * 255).astype(np.uint8)
+                    wb_corrected_first = intelligent_white_balance(first_frame_np, white_balance_strength)
+                    
+                    # Calculate the correction factors from first frame
+                    original_mean = torch.mean(batch_frames[0], dim=(0, 1))
+                    corrected_mean = torch.mean(torch.from_numpy(wb_corrected_first.astype(np.float32) / 255.0).to(device), dim=(0, 1))
+                    wb_factors = corrected_mean / (original_mean + 1e-6)
+                    
+                    # Apply same factors to entire batch
+                    processed_batch = processed_batch * wb_factors.view(1, 1, 1, 3)
+                    processed_batch = torch.clamp(processed_batch, 0.0, 1.0)
+                    print(f"🔧 Applied AI white balance to batch (factors: {wb_factors})")
+                else:
+                    # Tensor-based white balance for entire batch
+                    B, H, W, C = processed_batch.shape
+                    flat_batch = processed_batch.view(B, -1, C)
+                    percentile_40 = torch.quantile(flat_batch, 0.40, dim=1, keepdim=True)
+                    percentile_60 = torch.quantile(flat_batch, 0.60, dim=1, keepdim=True)
+                    midtone_mean = (percentile_40 + percentile_60) / 2.0
+                    avg_gray = torch.mean(midtone_mean, dim=-1, keepdim=True)
+                    scale = avg_gray / (midtone_mean + 1e-6)
+                    scale = torch.lerp(torch.ones_like(scale), scale, white_balance_strength)
+                    scale = scale.view(B, 1, 1, C)
+                    processed_batch = processed_batch * scale
+                    processed_batch = torch.clamp(processed_batch, 0.0, 1.0)
+                    print(f"🔧 Applied tensor white balance to batch")
+            
+            # Apply enhancement based on scene analysis
+            if enhancement_strength > 0.2:
+                hsv_temp = rgb_to_hsv(processed_batch)
+                h_temp, s_temp, v_temp = hsv_temp[..., 0], hsv_temp[..., 1], hsv_temp[..., 2]
+                
+                if analysis:
+                    scene_type = analysis["scene_type"]
+                    lighting = analysis["lighting"]
+                    
+                    # Scene-specific enhancements
+                    if scene_type == "anime":
+                        contrast_boost = 0.18 * enhancement_strength
+                        saturation_boost = 0.55 * enhancement_strength
+                        v_temp = 0.5 + (v_temp - 0.5) * (1.0 + contrast_boost)
+                        s_temp = s_temp * (1.0 + saturation_boost)
+                        print(f"🎨 Applied anime enhancement (contrast: {contrast_boost:.3f}, saturation: {saturation_boost:.3f})")
+                    elif scene_type == "concept_art":
+                        contrast_boost = 0.25 * enhancement_strength
+                        saturation_boost = 0.40 * enhancement_strength
+                        v_temp = 0.5 + (v_temp - 0.5) * (1.0 + contrast_boost)
+                        s_temp = s_temp * (1.0 + saturation_boost)
+                        print(f"🎨 Applied concept art enhancement")
+                    elif scene_type == "portrait":
+                        warmth += 0.05 * enhancement_strength
+                        contrast_boost = 0.12 * enhancement_strength
+                        v_temp = 0.5 + (v_temp - 0.5) * (1.0 + contrast_boost)
+                        print(f"🎨 Applied portrait enhancement")
+                    else:
+                        # General enhancement
+                        contrast_boost = 0.15 * enhancement_strength
+                        saturation_boost = 0.20 * enhancement_strength
+                        v_temp = 0.5 + (v_temp - 0.5) * (1.0 + contrast_boost)
+                        s_temp = s_temp * (1.0 + saturation_boost)
+                        print(f"🎨 Applied general enhancement")
+                    
+                    # Lighting adjustments
+                    if lighting == "low_light":
+                        brightness += 0.1 * enhancement_strength
+                        contrast += 0.4 * enhancement_strength
+                        print(f"💡 Applied low-light enhancement")
+                    elif lighting == "bright":
+                        brightness -= 0.05 * enhancement_strength
+                        print(f"💡 Applied bright lighting adjustment")
+                    elif lighting == "flat":
+                        contrast += 0.5 * enhancement_strength
+                        print(f"💡 Applied flat lighting enhancement")
+                
+                s_temp = torch.clamp(s_temp, 0.0, 1.0)
+                v_temp = torch.clamp(v_temp, 0.0, 1.0)
+                processed_batch = hsv_to_rgb(torch.stack([h_temp, s_temp, v_temp], dim=-1))
+            
+            # Face enhancement for Auto mode (if faces detected and adjust_for_skin_tone enabled)
+            if analysis and analysis.get("faces") and adjust_for_skin_tone and ADVANCED_LIBS_AVAILABLE:
+                print(f"👤 Applying face enhancement to batch with {len(analysis['faces'])} faces detected")
+                face_enhanced_frames = []
+                
+                for i in range(batch_size):
+                    frame_np = (processed_batch[i].cpu().numpy() * 255).astype(np.uint8)
+                    enhanced_frame_np = enhance_faces(frame_np, analysis["faces"], enhancement_strength * 0.5)
+                    enhanced_frame_tensor = torch.from_numpy(enhanced_frame_np.astype(np.float32) / 255.0).to(device)
+                    face_enhanced_frames.append(enhanced_frame_tensor)
+                
+                processed_batch = torch.stack(face_enhanced_frames, dim=0)
+                print(f"✅ Applied face enhancement to {batch_size} frames")
+        
+        # Convert to HSV for batch processing
+        hsv_batch = rgb_to_hsv(processed_batch)
+        h, s, v = hsv_batch[..., 0], hsv_batch[..., 1], hsv_batch[..., 2]
+        
+        # Track changes to confirm processing is happening
+        original_mean = torch.mean(processed_batch).item()
+        print(f"📊 Original batch mean: {original_mean:.4f}")
+        
+        # Apply color corrections to entire batch
+        if warmth != 0.0:
+            h = (h + warmth * 0.1) % 1.0
+            
+        if vibrancy != 0.0:
+            saturation_mask = 1.0 - s
+            s = s * (1.0 + vibrancy) + (vibrancy * 0.3 * saturation_mask * s)
+            
+        if brightness != 0.0:
+            v = v + brightness * (1.0 - v * 0.5)
+            
+        if contrast != 0.0:
+            v = 0.5 + (v - 0.5) * (1.0 + contrast)
+        
+        # Manual mode 3-way color correction (applied to entire batch)
+        if mode == "Manual":
+            # Create masks for entire batch
+            shadows_mask = 1.0 - torch.clamp(v * 3.0, 0.0, 1.0)
+            midtones_mask = 1.0 - torch.abs(v - 0.5) * 2.0
+            highlights_mask = torch.clamp((v - 0.66) * 3.0, 0.0, 1.0)
+            
+            if lift != 0.0:
+                v = v + (lift * 0.4 * shadows_mask)
+                
+            if gamma != 0.0:
+                gamma_exp = 1.0 / (1.0 + gamma * 0.8)
+                v_gamma = torch.pow(torch.clamp(v, 0.001, 1.0), gamma_exp)
+                v = torch.lerp(v, v_gamma, midtones_mask)
+                
+            if gain != 0.0:
+                v = v + (gain * 0.4 * highlights_mask)
+        
+        # Add noise to entire batch if specified
+        if noise > 0.0:
+            mono_noise = torch.randn(
+                (batch_size, processed_batch.shape[1], processed_batch.shape[2], 1), 
+                device=device
+            )
+            luminance_mask = 1.0 - torch.abs(v - 0.5) * 2.0
+            luminance_mask = torch.clamp(luminance_mask, 0.0, 1.0).unsqueeze(-1)
+            
+            rgb_temp = hsv_to_rgb(torch.stack([h, s, v], dim=-1))
+            rgb_temp += mono_noise * noise * 0.15 * luminance_mask
+            rgb_temp = torch.clamp(rgb_temp, 0.0, 1.0)
+            
+            hsv_temp = rgb_to_hsv(rgb_temp)
+            h, s, v = hsv_temp[..., 0], hsv_temp[..., 1], hsv_temp[..., 2]
+        
+        # Clamp and convert back to RGB
+        s = torch.clamp(s, 0.0, 1.0)
+        v = torch.clamp(v, 0.0, 1.0)
+        processed_hsv = torch.stack([h, s, v], dim=-1)
+        processed_batch = hsv_to_rgb(processed_hsv)
+        
+        # Apply effect strength to entire batch
+        if mode in ["Auto", "Preset"]:
+            processed_batch = torch.lerp(original_batch, processed_batch, effect_strength)
+        
+        # Apply masks to entire batch if provided
+        if batch_masks is not None:
+            if batch_masks.shape[1:] != (processed_batch.shape[1], processed_batch.shape[2]):
+                batch_masks = F.interpolate(
+                    batch_masks.unsqueeze(1),
+                    size=(processed_batch.shape[1], processed_batch.shape[2]),
+                    mode="bilinear",
+                    align_corners=False,
+                ).squeeze(1)
+            batch_masks = batch_masks.unsqueeze(-1)
+            processed_batch = torch.lerp(original_batch, processed_batch, batch_masks)
+        
+        processed_batch = torch.clamp(processed_batch, 0.0, 1.0)
+        
+        # Confirm processing happened
+        final_mean = torch.mean(processed_batch).item()
+        change = abs(final_mean - original_mean)
+        print(f"📊 Final batch mean: {final_mean:.4f} | Change: {change:.6f}")
+        if change > 0.001:
+            print("✅ Color correction applied successfully")
+        else:
+            print("⚠️ Minimal/no changes detected")
+        
+        return processed_batch
+
+    def _analyze_image_gpu(self, image_tensor, device):
+        """
+        GPU-based image analysis without CPU bottlenecks.
+        Replaces CPU-heavy OpenCV operations with GPU tensor operations.
+        """
+        # Convert to HSV for analysis
+        hsv = rgb_to_hsv(image_tensor.unsqueeze(0))[0]  # Remove batch dim
+        h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+        
+        # Analyze brightness distribution (replaces histogram analysis)
+        brightness_mean = torch.mean(v).item()
+        brightness_std = torch.std(v).item()
+        
+        # Determine lighting condition based on brightness stats
+        if brightness_mean < 0.3:
+            lighting_condition = "low_light"
+        elif brightness_mean > 0.8:
+            lighting_condition = "bright"
+        elif brightness_std < 0.15:
+            lighting_condition = "flat"
+        else:
+            lighting_condition = "optimal"
+        
+        # Analyze saturation for scene type detection
+        saturation_mean = torch.mean(s).item()
+        saturation_std = torch.std(s).item()
+        
+        # Simple scene classification based on color statistics
+        if saturation_mean > 0.6 and saturation_std > 0.25:
+            scene_type = "concept_art"
+        elif saturation_mean > 0.5:
+            scene_type = "stylized_art"
+        elif saturation_mean < 0.3:
+            scene_type = "portrait"
+        else:
+            scene_type = "realistic_photo"
+        
+        # Edge detection using Sobel filters on GPU
+        gray = torch.mean(image_tensor, dim=-1, keepdim=True)
+        
+        # Sobel kernels
+        sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32, device=device).view(1, 1, 3, 3)
+        sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32, device=device).view(1, 1, 3, 3)
+        
+        # Apply convolution for edge detection
+        gray_padded = F.pad(gray.permute(2, 0, 1).unsqueeze(0), (1, 1, 1, 1), mode='reflect')
+        edges_x = F.conv2d(gray_padded, sobel_x)
+        edges_y = F.conv2d(gray_padded, sobel_y)
+        edges = torch.sqrt(edges_x**2 + edges_y**2)
+        
+        edge_density = torch.mean(edges).item()
+        
+        return {
+            "scene_type": scene_type,
+            "lighting_condition": lighting_condition,
+            "brightness_mean": brightness_mean,
+            "saturation_mean": saturation_mean,
+            "edge_density": edge_density,
+            "has_faces": False,  # Simplified - no CPU face detection
+            "skin_tone_areas": []  # Simplified - avoid CPU processing
+        }
+
+
+class RawImageProcessor:
+    """
+    Advanced Image Processor for camera raw, HDR, and lossless formats.
+    Handles DNG, ARW, CR2, NEF, EXR, HDR, TIFF 16-bit, and other high-quality formats.
+    Outputs processed IMAGE data compatible with EasyColorCorrection.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "file_path": ("STRING", {"default": "", "multiline": False}),
+                "format_type": (["auto", "raw", "exr", "hdr", "tiff16"], {"default": "auto"}),
+            },
+            "optional": {
+                # RAW-specific controls
+                "white_balance": (["auto", "camera", "daylight", "cloudy", "shade", "tungsten", "fluorescent", "flash"], {"default": "auto"}),
+                "demosaic_algorithm": (["AHD", "VNG", "PPG", "AAHD"], {"default": "AHD"}),
+                
+                # HDR/EXR tone mapping controls
+                "tone_mapping": (["none", "reinhard", "drago", "aces"], {"default": "aces"}),
+                "hdr_exposure": ("FLOAT", {"default": 0.0, "min": -5.0, "max": 5.0, "step": 0.1}),
+                "hdr_gamma": ("FLOAT", {"default": 2.2, "min": 0.5, "max": 4.0, "step": 0.1}),
+                
+                # Universal controls
+                "exposure": ("FLOAT", {"default": 0.0, "min": -3.0, "max": 3.0, "step": 0.1}),
+                "highlights": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.1}),
+                "shadows": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.1}),
+                "brightness": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.1}),
+                "contrast": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.1}),
+                "saturation": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.1}),
+                "noise_reduction": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.1}),
+                "output_colorspace": (["sRGB", "Adobe RGB", "ProPhoto RGB"], {"default": "sRGB"}),
+                "output_gamma": (["sRGB", "linear", "1.8", "2.2"], {"default": "sRGB"}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("image", "metadata")
+    FUNCTION = "process_raw_image"
+    CATEGORY = "itsjustregi / Easy Color Correction"
+
+    def process_raw_image(
+        self,
+        file_path,
+        format_type="auto",
+        white_balance="auto",
+        demosaic_algorithm="AHD",
+        tone_mapping="aces",
+        hdr_exposure=0.0,
+        hdr_gamma=2.2,
+        exposure=0.0,
+        highlights=0.0,
+        shadows=0.0,
+        brightness=0.0,
+        contrast=0.0,
+        saturation=0.0,
+        noise_reduction=0.0,
+        output_colorspace="sRGB",
+        output_gamma="sRGB",
+    ):
+        """
+        Process advanced image formats (RAW, EXR, HDR, TIFF 16-bit) with professional controls.
+        """
+        if not file_path or not file_path.strip():
+            raise ValueError("File path is required")
+        
+        # Auto-detect format based on file extension
+        file_extension = file_path.lower().split('.')[-1]
+        if format_type == "auto":
+            if file_extension in ['dng', 'arw', 'cr2', 'nef', 'orf', 'rw2', 'raf']:
+                format_type = "raw"
+            elif file_extension == 'exr':
+                format_type = "exr"
+            elif file_extension == 'hdr':
+                format_type = "hdr"
+            elif file_extension in ['tiff', 'tif']:
+                format_type = "tiff16"
+            else:
+                format_type = "raw"  # Default fallback
+        
+        try:
+            if format_type == "raw":
+                rgb_array, metadata_info = self._process_raw_format(
+                    file_path, white_balance, demosaic_algorithm, exposure, 
+                    highlights, shadows, brightness, noise_reduction, 
+                    output_colorspace, output_gamma
+                )
+            
+            elif format_type == "exr":
+                rgb_array, metadata_info = self._process_exr_format(
+                    file_path, tone_mapping, hdr_exposure, hdr_gamma,
+                    exposure, highlights, shadows, brightness, contrast, saturation
+                )
+            
+            elif format_type == "hdr":
+                rgb_array, metadata_info = self._process_hdr_format(
+                    file_path, tone_mapping, hdr_exposure, hdr_gamma,
+                    exposure, highlights, shadows, brightness, contrast, saturation
+                )
+            
+            elif format_type == "tiff16":
+                rgb_array, metadata_info = self._process_tiff16_format(
+                    file_path, exposure, highlights, shadows, 
+                    brightness, contrast, saturation
+                )
+            
+            else:
+                raise ValueError(f"Unsupported format type: {format_type}")
+                
+        except Exception as e:
+            error_msg = f"Error processing {format_type.upper()} file: {str(e)}"
+            print(error_msg)
+            # Return a black image as fallback
+            rgb_array = np.zeros((512, 512, 3), dtype=np.uint8)
+            metadata_info = {"error": error_msg}
+        
+        # Convert to PyTorch tensor format expected by ComfyUI
+        if rgb_array.dtype != np.uint8:
+            # Normalize HDR data to 0-1 range before converting to uint8
+            if rgb_array.max() > 1.0:
+                rgb_array = rgb_array / rgb_array.max()
+            rgb_array = (rgb_array * 255).astype(np.uint8)
+        
+        # Convert to float and normalize to 0-1 range
+        image_tensor = torch.from_numpy(rgb_array.astype(np.float32) / 255.0)
+        
+        # Add batch dimension: (H, W, C) -> (1, H, W, C)
+        image_tensor = image_tensor.unsqueeze(0)
+        
+        # Format metadata as string
+        metadata_str = ", ".join([f"{k}: {v}" for k, v in metadata_info.items()])
+        
+        print(f"✅ {format_type.upper()} Image Processed: {rgb_array.shape[1]}x{rgb_array.shape[0]} from {file_path}")
+        if metadata_str:
+            print(f"📷 Metadata: {metadata_str}")
+        
+        return (image_tensor, metadata_str)
+
+    def _process_raw_format(self, file_path, white_balance, demosaic_algorithm, exposure, 
+                           highlights, shadows, brightness, noise_reduction, 
+                           output_colorspace, output_gamma):
+        """Process RAW camera formats using rawpy."""
+        if not RAW_PROCESSING_AVAILABLE:
+            raise ValueError("RAW processing not available. Install rawpy: pip install rawpy")
+        
+        with rawpy.imread(file_path) as raw:
+            params = rawpy.Params()
+            
+            # Demosaic algorithm
+            demosaic_map = {
+                "AHD": rawpy.DemosaicAlgorithm.AHD,
+                "VNG": rawpy.DemosaicAlgorithm.VNG, 
+                "PPG": rawpy.DemosaicAlgorithm.PPG,
+                "AAHD": rawpy.DemosaicAlgorithm.AAHD
+            }
+            params.demosaic_algorithm = demosaic_map.get(demosaic_algorithm, rawpy.DemosaicAlgorithm.AHD)
+            
+            # White balance
+            if white_balance == "auto":
+                params.use_auto_wb = True
+            elif white_balance == "camera":
+                params.use_camera_wb = True
+            else:
+                wb_presets = {
+                    "daylight": [1.0, 1.0, 1.0, 1.0],
+                    "cloudy": [1.2, 1.0, 0.8, 1.0],
+                    "shade": [1.4, 1.0, 0.7, 1.0],
+                    "tungsten": [0.6, 1.0, 1.8, 1.0],
+                    "fluorescent": [0.8, 1.0, 1.4, 1.0],
+                    "flash": [1.1, 1.0, 0.9, 1.0]
+                }
+                if white_balance in wb_presets:
+                    params.user_wb = wb_presets[white_balance]
+            
+            # Exposure and processing
+            params.exp_correc = True
+            params.exp_shift = exposure
+            params.highlight_mode = rawpy.HighlightMode.Clip if highlights == 0 else rawpy.HighlightMode.Reconstruct
+            params.bright = 1.0 + brightness
+            params.output_color = rawpy.ColorSpace.sRGB if output_colorspace == "sRGB" else rawpy.ColorSpace.Adobe
+            params.gamma = (1.0, 1.0) if output_gamma == "linear" else (2.2, 4.5)
+            
+            if noise_reduction > 0:
+                params.median_filter_passes = int(noise_reduction * 5)
+            
+            rgb_array = raw.postprocess(params)
+            
+            metadata_info = {
+                "format": "RAW",
+                "width": rgb_array.shape[1],
+                "height": rgb_array.shape[0],
+                "demosaic": demosaic_algorithm,
+                "white_balance": white_balance
+            }
+            
+        return rgb_array, metadata_info
+
+    def _process_exr_format(self, file_path, tone_mapping, hdr_exposure, hdr_gamma,
+                           exposure, highlights, shadows, brightness, contrast, saturation):
+        """Process EXR HDR format using OpenEXR."""
+        if not EXR_PROCESSING_AVAILABLE:
+            # Fallback to imageio if OpenEXR not available
+            if IMAGEIO_AVAILABLE:
+                return self._process_with_imageio(file_path, "EXR", tone_mapping, hdr_exposure, hdr_gamma,
+                                                exposure, highlights, shadows, brightness, contrast, saturation)
+            else:
+                raise ValueError("EXR processing requires OpenEXR or imageio library")
+        
+        exr_file = OpenEXR.InputFile(file_path)
+        header = exr_file.header()
+        
+        # Get image dimensions
+        dw = header['displayWindow']
+        width = dw.max.x - dw.min.x + 1
+        height = dw.max.y - dw.min.y + 1
+        
+        # Read RGB channels
+        channels = exr_file.channels(['R', 'G', 'B'], Imath.PixelType(Imath.PixelType.FLOAT))
+        
+        # Convert to numpy arrays
+        r_channel = np.frombuffer(channels[0], dtype=np.float32).reshape(height, width)
+        g_channel = np.frombuffer(channels[1], dtype=np.float32).reshape(height, width)
+        b_channel = np.frombuffer(channels[2], dtype=np.float32).reshape(height, width)
+        
+        # Combine channels
+        rgb_array = np.stack([r_channel, g_channel, b_channel], axis=2)
+        
+        # Apply HDR exposure
+        if hdr_exposure != 0:
+            rgb_array = rgb_array * (2 ** hdr_exposure)
+        
+        # Apply tone mapping
+        rgb_array = self._apply_tone_mapping(rgb_array, tone_mapping, hdr_gamma)
+        
+        metadata_info = {
+            "format": "EXR",
+            "width": width,
+            "height": height,
+            "tone_mapping": tone_mapping,
+            "hdr_exposure": hdr_exposure
+        }
+        
+        return rgb_array, metadata_info
+
+    def _process_hdr_format(self, file_path, tone_mapping, hdr_exposure, hdr_gamma,
+                           exposure, highlights, shadows, brightness, contrast, saturation):
+        """Process HDR format using imageio."""
+        if not IMAGEIO_AVAILABLE:
+            raise ValueError("HDR processing requires imageio library")
+        
+        # Read HDR image
+        rgb_array = imageio.imread(file_path, format='HDR-FI')
+        
+        # Apply HDR exposure
+        if hdr_exposure != 0:
+            rgb_array = rgb_array * (2 ** hdr_exposure)
+        
+        # Apply tone mapping
+        rgb_array = self._apply_tone_mapping(rgb_array, tone_mapping, hdr_gamma)
+        
+        metadata_info = {
+            "format": "HDR",
+            "width": rgb_array.shape[1],
+            "height": rgb_array.shape[0],
+            "tone_mapping": tone_mapping,
+            "hdr_exposure": hdr_exposure
+        }
+        
+        return rgb_array, metadata_info
+
+    def _process_tiff16_format(self, file_path, exposure, highlights, shadows, 
+                              brightness, contrast, saturation):
+        """Process 16-bit TIFF format."""
+        if not IMAGEIO_AVAILABLE:
+            raise ValueError("TIFF 16-bit processing requires imageio library")
+        
+        # Read 16-bit TIFF
+        rgb_array = imageio.imread(file_path)
+        
+        # Convert to float and normalize
+        if rgb_array.dtype == np.uint16:
+            rgb_array = rgb_array.astype(np.float32) / 65535.0
+        elif rgb_array.dtype == np.uint8:
+            rgb_array = rgb_array.astype(np.float32) / 255.0
+        
+        # Apply basic adjustments
+        if exposure != 0:
+            rgb_array = rgb_array * (2 ** exposure)
+        
+        rgb_array = np.clip(rgb_array, 0, 1)
+        
+        metadata_info = {
+            "format": "TIFF 16-bit",
+            "width": rgb_array.shape[1],
+            "height": rgb_array.shape[0],
+            "bit_depth": "16-bit" if rgb_array.dtype == np.uint16 else "8-bit"
+        }
+        
+        return rgb_array, metadata_info
+
+    def _process_with_imageio(self, file_path, format_name, tone_mapping, hdr_exposure, hdr_gamma,
+                             exposure, highlights, shadows, brightness, contrast, saturation):
+        """Fallback processing using imageio."""
+        rgb_array = imageio.imread(file_path)
+        
+        # Convert to float if needed
+        if rgb_array.dtype == np.uint8:
+            rgb_array = rgb_array.astype(np.float32) / 255.0
+        elif rgb_array.dtype == np.uint16:
+            rgb_array = rgb_array.astype(np.float32) / 65535.0
+        
+        # Apply HDR exposure if it's an HDR format
+        if hdr_exposure != 0:
+            rgb_array = rgb_array * (2 ** hdr_exposure)
+        
+        # Apply tone mapping for HDR formats
+        if format_name in ["EXR", "HDR"]:
+            rgb_array = self._apply_tone_mapping(rgb_array, tone_mapping, hdr_gamma)
+        
+        metadata_info = {
+            "format": f"{format_name} (imageio fallback)",
+            "width": rgb_array.shape[1],
+            "height": rgb_array.shape[0]
+        }
+        
+        return rgb_array, metadata_info
+
+    def _apply_tone_mapping(self, rgb_array, tone_mapping, hdr_gamma):
+        """Apply tone mapping to HDR image data."""
+        if tone_mapping == "none":
+            return np.clip(rgb_array, 0, 1)
+        
+        elif tone_mapping == "reinhard":
+            # Simple Reinhard tone mapping
+            return rgb_array / (1.0 + rgb_array)
+        
+        elif tone_mapping == "drago":
+            # Drago tone mapping approximation
+            luminance = np.dot(rgb_array, [0.299, 0.587, 0.114])
+            max_lum = np.max(luminance)
+            if max_lum > 0:
+                scale = np.log10(max_lum + 1) / np.log10(2.0 + 8.0 * ((luminance / max_lum) ** (np.log10(0.5) / np.log10(0.85))))
+                return rgb_array * scale[..., np.newaxis]
+            return rgb_array
+        
+        elif tone_mapping == "aces":
+            # ACES tone mapping curve approximation
+            a = 2.51
+            b = 0.03
+            c = 2.43
+            d = 0.59
+            e = 0.14
+            return np.clip((rgb_array * (a * rgb_array + b)) / (rgb_array * (c * rgb_array + d) + e), 0, 1)
+        
+        # Apply gamma correction
+        if hdr_gamma != 2.2:
+            rgb_array = np.power(np.clip(rgb_array, 0, 1), 1.0 / hdr_gamma)
+        
+        return np.clip(rgb_array, 0, 1)
+
+
+class ColorCorrectionViewer:
+    """
+    Video Viewer for batch color-corrected image sequences.
+    Provides playback controls with adjustable framerate.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 60.0, "step": 0.1}),
+            },
+            "optional": {
+                "auto_play": ("BOOLEAN", {"default": True}),
+                "loop": ("BOOLEAN", {"default": True}),
+                "frame_skip": ("INT", {"default": 1, "min": 1, "max": 10, "step": 1}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "INT", "FLOAT")
+    RETURN_NAMES = ("images", "frame_count", "duration")
+    FUNCTION = "view_sequence"
+    CATEGORY = "itsjustregi / Easy Color Correction"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")  # Always update for video display
+    
+    @classmethod
+    def VALIDATE_INPUTS(cls, **kwargs):
+        return True
+
+    def view_sequence(self, images, fps=24.0, auto_play=True, loop=True, frame_skip=1):
+        """
+        Display image sequence with video playback controls.
+        """
+        if images is None or images.shape[0] == 0:
+            print("⚠️ No images provided to viewer")
+            return (images, 0, 0.0)
+        
+        total_frames = images.shape[0]
+        
+        # Apply frame skipping if specified
+        if frame_skip > 1:
+            selected_indices = torch.arange(0, total_frames, frame_skip)
+            images = images[selected_indices]
+            total_frames = images.shape[0]
+        
+        duration = total_frames / fps
+        
+        print(f"🎬 Color Correction Viewer: {total_frames} frames at {fps} FPS")
+        print(f"⏱️ Duration: {duration:.2f} seconds")
+        print(f"🔄 Auto-play: {auto_play}, Loop: {loop}")
+        if frame_skip > 1:
+            print(f"⏭️ Frame skip: every {frame_skip} frames")
+        
+        # For ComfyUI preview, we need to return the images
+        # The frontend will handle the video player widget
+        return (images, total_frames, duration)
+
+
+# Export all classes
+__all__ = ["EasyColorCorrection", "BatchColorCorrection", "RawImageProcessor", "ColorCorrectionViewer"]
