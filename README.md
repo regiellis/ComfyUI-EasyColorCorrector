@@ -6,28 +6,33 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![ComfyUI](https://img.shields.io/badge/ComfyUI-Compatible-brightgreen.svg)](https://github.com/comfyanonymous/ComfyUI)
 
+>[!WARNING]
+> Release v1.2.1 introduces **major refactoring** and **enhancements** and a need name change to **ComfyUI-EasyColorCorrector**. This is a **breaking change** and you will may need to uninstall the old node before installing the new one.
+
 > [!NOTE]
 > **Disclaimer**: I'm obviously joking about the "$1000+ plugin" claims and competing with Photoshop - this is a ComfyUI custom node, not industry software! 😄 **BUT** it does have legit AI-powered features, face detection, and professional color science. And hey, it beats paying Adobe! 💰
 
 ---
 
-## 🆕 **Latest Updates (v1.0.1)**
+## 🆕 **Latest Updates (Major Update)**
 
-### ✨ **Major Professional Improvements**
-- **🎛️ Professional Manual Mode**: Temperature + Tint separation like Lightroom/DaVinci Resolve
-- **📊 Balanced Slider Ranges**: Realistic parameter ranges that don't break at low values
-- **🎨 Live Preset Updates**: Sliders automatically update when presets change
-- **🤖 Smart AI Behavior**: AI analysis auto-disabled in Manual mode for pure control
-- **🌡️ Proper Temperature Control**: -1.0 to 1.0 range with real temperature adjustment (not hue shift)
-- **🎨 Fixed Skin Tone Processing**: Eliminated green tint on light skin
-- **⚡ Enhanced Controls**: Working lift/gamma/gain with proper strength balancing
+### ✨ **Major Professional Improvements & Fixes**
+- **Manual Mode is now truly professional**: Real temperature + tint separation (LAB color space), not just hue sliders
+- **Preset Mode is transparent**: Sliders update live to show exactly what each preset does
+- **Slider ranges are realistic**: No more wild values—contrast/brightness are now in sensible ranges
+- **White Balance is professional**: -1.0 (cool/blue) to +1.0 (warm/orange), like real color grading software
+- **Skin tone processing fixed**: No more green tint on light skin—portraits look natural
+- **Smart UI**: AI analysis auto-disables in Manual mode for pure manual control
+- **Live Preset Updates**: See exactly what each preset does to your sliders
+- **2-Axis Color Control**: Separate temperature and tint like the pros use
+- **Working 3-Way Correction**: Lift/Gamma/Gain actually works now
 
-### 🔧 **Technical Fixes**
-- Enhancement strength now hidden when AI analysis is disabled (no more confusion)
-- White balance redesigned for professional temperature control in LAB color space
-- Preset mode fully functional with proper parameter application
-- Manual mode parameters work independently without AI interference
-- Improved default values for more subtle, professional results
+### 🆕 **New Nodes (Beta)**
+- **Batch Color Corrector**: Process entire video sequences with the same AI-powered corrections
+- **RAW Image Processor**: Direct RAW file processing with professional color science
+- **Color Correction Viewer**: Real-time preview and analysis for video workflows
+
+> The main Color Corrector is now professional-grade and rock solid. The new nodes are experimental playgrounds for advanced workflows.
 
 ---
 
@@ -60,6 +65,7 @@ If not… hey, at least now you have histograms.
 ## ✨ Key Features
 
 ### 🤖 **AI-Powered Intelligence**
+
 - **Face Detection**: Automatic skin tone preservation using OpenCV with advanced segmentation
 - **Advanced Scene Analysis**: Detects anime, concept art, stylized art, detailed illustrations, portraits, and realistic photos
 - **Lighting Detection**: Low-light, bright, flat, optimal lighting analysis
@@ -68,6 +74,7 @@ If not… hey, at least now you have histograms.
 - **Advanced Segmentation**: SLIC-based skin region detection for precise face enhancement
 
 ### 🎨 **Professional Color Science**
+
 - **LAB Color Space**: Perceptual white balance and color corrections with Bradford chromatic adaptation
 - **K-means Analysis**: Intelligent dominant color extraction in both RGB and LAB spaces
 - **3-Way Color Corrector**: Professional lift/gamma/gain controls
@@ -76,6 +83,7 @@ If not… hey, at least now you have histograms.
 - **Professional Color Extraction**: Brightness-sorted palette generation with perceptual spacing
 
 ### ⚡ **Performance & Usability**
+
 - **Real-time Preview**: Selective node execution (no full workflow runs)
 - **Graceful Fallbacks**: Works without advanced libraries installed
 - **Three Distinct Modes**: Each optimized for different use cases
@@ -88,9 +96,11 @@ If not… hey, at least now you have histograms.
 ## 🎛️ The Three Modes
 
 ### 🤖 **Auto Mode: AI Magic**
-*"Just make it look amazing"*
+
+Just make it look amazing
 
 The AI analyzes your image and applies:
+
 - **Scene-specific enhancement profiles** for 6 content types (anime, concept art, stylized art, detailed illustrations, portraits, realistic photos)
 - **Intelligent white balance** in LAB color space
 - **Face-aware skin tone preservation** using OpenCV detection
@@ -101,7 +111,8 @@ The AI analyzes your image and applies:
 **Perfect for**: Quick enhancement, artistic content, concept art, anime, batch processing
 
 ### 🎨 **Preset Mode: Curated Looks**
-*"Give me that specific vibe"*
+
+Give me that specific vibe
 
 30 professional presets with intelligent slider updates:
 
@@ -113,6 +124,7 @@ The AI analyzes your image and applies:
 **Classic (4)**: Sepia, Black & White, Faded, Moody
 
 Enhanced Features:
+
 - **Live slider updates**: Presets automatically update parameter sliders for full transparency
 - **Content-aware adaptation**: Presets automatically adjust based on detected scene type
 - **Artistic content boost**: Up to 40% enhancement for concept art and illustrations  
@@ -121,6 +133,7 @@ Enhanced Features:
 **Perfect for**: Consistent styling, concept art workflows, artistic looks, client work
 
 ### 🎛️ **Manual Mode: Professional Control**
+
 *"I know exactly what I want"*
 
 Professional-grade tools with pure manual control:
