@@ -13,9 +13,9 @@ NODE_CLASS_MAPPINGS = {
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "EasyColorCorrection": "Color Corrector",
-    "BatchColorCorrection": "Batch Color Corrector",
-    "RawImageProcessor": "RAW Image Processor",
-    "ColorCorrectionViewer": "Color Correction Viewer",
+    "BatchColorCorrection": "Batch Color Corrector (beta)",
+    "RawImageProcessor": "RAW Image Processor (beta)",
+    "ColorCorrectionViewer": "Color Correction Viewer (beta)",
 }
 
 __all__ = [
