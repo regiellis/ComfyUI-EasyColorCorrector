@@ -187,18 +187,28 @@ The node provides four distinct outputs for maximum workflow flexibility:
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/regiellis/ComfyUI-EasyColorCorrection.git
-cd ComfyUI-EasyColorCorrection
+git clone https://github.com/regiellis/ComfyUI-EasyColorCorrector.git
+cd ComfyUI-EasyColorCorrector
 pip install -r requirements.txt
 ```
 
 ### Manual Install
 
-1. Download and extract to `ComfyUI/custom_nodes/ComfyUI-EasyColorCorrection`
+1. Download and extract to `ComfyUI/custom_nodes/ComfyUI-EasyColorCorrector`
 2. Install dependencies:
 
 ```bash
-pip install torch>=1.12.0 numpy>=1.21.0 opencv-python>=4.8.0 scikit-learn>=1.3.0 scikit-image>=0.21.0 colour-science>=0.4.3 scipy>=1.11.0
+pip install \
+    "torch>=1.12.0" \
+    "numpy>=1.21.0 \
+    "opencv-python>=4.8.0" \
+    "scikit-learn>=1.3.0" \
+    "scikit-image>=0.21.0" \
+    "colour-science>=0.4.3" \
+    "scipy>=1.11.0" \
+    "rawpy>=0.18.0" \
+    "imageio>=2.28.0"\
+    "OpenEXR>=1.3.9"
 ```
 
 3. Restart ComfyUI
@@ -228,7 +238,7 @@ pip install torch>=1.12.0 numpy>=1.21.0 opencv-python>=4.8.0 scikit-learn>=1.3.0
 Enable **"Extract Palette"** to generate:
 - ✅ RGB histogram visualization
 - ✅ Color palette extraction and visualization  
-- ✅ Dominant color analysis in console
+- ✅ Dominant color analysis in the console
 - ✅ Advanced K-means clustering
 
 When disabled, histogram and palette outputs will be black images.
