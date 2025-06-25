@@ -1,4 +1,4 @@
-# ComfyUI-EasyColorCorrection 🎨
+# ComfyUI-EasyColorCorrector 🎨
 
 **Professional-grade AI-powered color correction and enhancement for ComfyUI**
 
@@ -11,9 +11,38 @@
 
 ---
 
-## 🚀 What is this?
+## 🆕 **Latest Updates (v1.0.1)**
 
-**ComfyUI-EasyColorCorrection** isn't just another color correction node. It's a **professional-grade AI-powered color grading suite** that brings $1000+ plugin capabilities directly into your ComfyUI workflows.
+### ✨ **Major Professional Improvements**
+- **🎛️ Professional Manual Mode**: Temperature + Tint separation like Lightroom/DaVinci Resolve
+- **📊 Balanced Slider Ranges**: Realistic parameter ranges that don't break at low values
+- **🎨 Live Preset Updates**: Sliders automatically update when presets change
+- **🤖 Smart AI Behavior**: AI analysis auto-disabled in Manual mode for pure control
+- **🌡️ Proper Temperature Control**: -1.0 to 1.0 range with real temperature adjustment (not hue shift)
+- **🎨 Fixed Skin Tone Processing**: Eliminated green tint on light skin
+- **⚡ Enhanced Controls**: Working lift/gamma/gain with proper strength balancing
+
+### 🔧 **Technical Fixes**
+- Enhancement strength now hidden when AI analysis is disabled (no more confusion)
+- White balance redesigned for professional temperature control in LAB color space
+- Preset mode fully functional with proper parameter application
+- Manual mode parameters work independently without AI interference
+- Improved default values for more subtle, professional results
+
+---
+
+## 🚀 What is this?
+ **ComfyUI-EasyColorCorrector** *is a professional-grade, AI-powered color correction suite that democratizes advanced color grading for the ComfyUI ecosystem.*
+
+**That’s the fancy version.**
+
+**Real talk:** I’m not trying to take over the color correction world. It’s just a node.
+
+ I built it to bridge the gap between **“AI, *do the thing*”** and **“let me tweak this like I’m grading a Netflix series.”**
+If it helps artists, creators, and chaos-powered ComfyUI users get better color without paying Adobe or wiring 12 nodes together? Mission accomplished.
+
+If not… hey, at least now you have histograms.
+
 
 **This node is *opinionated* about color science** - it leverages computer vision, perceptual color spaces, and advanced algorithms to deliver results that rival industry-standard color grading tools.
 
@@ -74,7 +103,7 @@ The AI analyzes your image and applies:
 ### 🎨 **Preset Mode: Curated Looks**
 *"Give me that specific vibe"*
 
-30 professional presets optimized for both photographic and artistic content:
+30 professional presets with intelligent slider updates:
 
 **Portrait Presets (5)**: Natural, Warm, Cool, High Key, Dramatic  
 **Concept Art & Illustration (6)**: Epic Fantasy, Sci-Fi Chrome, Dark Fantasy, Vibrant Concept, Matte Painting, Digital Art  
@@ -83,7 +112,8 @@ The AI analyzes your image and applies:
 **Natural (4)**: Golden Hour, Blue Hour, Sunny Day, Overcast  
 **Classic (4)**: Sepia, Black & White, Faded, Moody
 
-AI-Enhanced Features:
+Enhanced Features:
+- **Live slider updates**: Presets automatically update parameter sliders for full transparency
 - **Content-aware adaptation**: Presets automatically adjust based on detected scene type
 - **Artistic content boost**: Up to 40% enhancement for concept art and illustrations  
 - **Smart variation**: Intelligent randomization that respects the original artistic intent
@@ -93,15 +123,16 @@ AI-Enhanced Features:
 ### 🎛️ **Manual Mode: Professional Control**
 *"I know exactly what I want"*
 
-Professional-grade tools with AI assistance:
-- **3-way color corrector** with artistic content-aware masking (shadows/midtones/highlights)
-- **Enhanced controls for artistic content**: 25% stronger lift/gain adjustments for concept art
-- **Perceptual gamma curves** with more dramatic mapping for illustrations
+Professional-grade tools with pure manual control:
+- **Professional Temperature & Tint**: Separate LAB color space controls (blue↔orange, green↔magenta)
+- **3-way color corrector**: Lift/Gamma/Gain with balanced ranges for precise control
+- **Intelligent UI**: AI analysis auto-disabled for pure manual workflow
+- **Balanced parameter ranges**: Realistic slider ranges that don't break at low values
+- **Professional color grading**: Works like Lightroom/DaVinci Resolve
 - **Film-like grain** with luminance preservation
-- **Face-aware protection** during manual adjustments
-- **LAB color space white balance** for professional accuracy
+- **Enhanced sliders**: Fine-tuned steps for precise adjustments
 
-**Perfect for**: Precision work, concept art finishing, learning color grading, complex corrections
+**Perfect for**: Precision work, professional color grading, learning, complex corrections
 
 ---
 
@@ -192,7 +223,10 @@ When disabled, histogram and palette outputs will be black images.
 ### 🔥 Pro Tips
 
 - **Enable Real-time Preview** for instant feedback (uses selective execution)
-- **Keep AI Analysis on** unless you need maximum speed
+- **Manual Mode auto-disables AI** for pure manual control (can re-enable if needed)
+- **Preset sliders update automatically** showing exactly what the preset does
+- **White Balance**: -1.0 = cooler/blue, +1.0 = warmer/orange (professional range)
+- **Temperature & Tint**: Separate controls in Manual mode for professional color grading
 - **Face detection works best** with clear, well-lit portraits
 - **Try presets first**, then fine-tune with manual controls
 - **Enable Extract Palette** to see histogram and color analysis
@@ -204,7 +238,8 @@ When disabled, histogram and palette outputs will be black images.
 ```
 🤖 AI Analysis: concept_art scene, good lighting, 0 faces detected
 🎨 AI-Enhanced Preset: Epic Fantasy adapted for concept_art/good
-🎛️ Professional Manual Mode + AI Guidance (concept_art)
+🎛️ Manual Mode: Auto-disabled AI analysis for pure manual control
+🌡️ Applied professional color adjustments: temperature: 0.3 (warmer), tint: -0.1 (green)
 🎨 Extracted color palette: #2A1810,#8B4513,#D2691E,#F4A460,#DEB887,#F5DEB3
 🖼️ Histogram and palette images available as separate node outputs
 ```
@@ -218,8 +253,8 @@ When disabled, histogram and palette outputs will be black images.
 ```python
 ai_analysis: bool = True          # Enable AI-powered features
 adjust_for_skin_tone: bool = True # Face detection + skin preservation  
-white_balance_strength: 0.6       # LAB color space correction strength
-enhancement_strength: 0.8         # Overall AI enhancement power
+white_balance_strength: 0.0       # Temperature: -1.0 (cool) to +1.0 (warm)
+enhancement_strength: 0.2         # Overall AI enhancement power (balanced default)
 extract_palette: bool = False     # Generate histogram and palette images
 ```
 

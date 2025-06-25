@@ -1,102 +1,145 @@
-# ComfyUI-EasyColorCorrection Specification
+# ComfyUI-Easy Color Corrector Project Goals
 
-## Overview
+## Project Vision
 
-**ComfyUI-EasyColorCorrection** is a ComfyUI custom node designed for flexible and efficient image color correction and post-processing within AI image generation workflows. The node leverages PyTorch for GPU-accelerated operations and supports both global and localized (masked) adjustments. It is intended to simplify color grading and correction for users working in ComfyUI, especially those focusing on structured prompts and style profiles[2].
+ **ComfyUI-EasyColorCorrector** is a professional-grade, AI-powered color correction suite that democratizes advanced color grading for the ComfyUI ecosystem.
 
----
+ That’s the fancy version.
 
-## Current Features
+ Real talk: I’m not trying to take over the color correction world. It’s just a node.
 
-### 1. Global Tonal Adjustments
+ I built it to bridge the gap between “AI, do the thing” and “let me tweak this like I’m grading a Netflix series.”
 
-- **Contrast:** Adjusts the difference between light and dark areas.
-- **Gamma:** Controls mid-tone brightness.
-- **Saturation:** Enhances or subdues image vibrancy.
+ If it helps artists, creators, and chaos-powered ComfyUI users get better color without paying Adobe or wiring 12 nodes together? Mission accomplished.
 
-### 2. Color Adjustments
+ If not… hey, at least now you have histograms.
 
-- **Hue Rotation:** Rotates the color spectrum.
-- **RGB Channel Offsets:** Allows individual adjustments to Red, Green, and Blue channels for precise color grading.
 
-### 3. Creative Effects
-
-- **Color Gel:** Applies a colored tint with adjustable strength. The gel color can be specified using hex codes (e.g., `#RRGGBB`) or RGB comma-separated values (e.g., `R,G,B`).
-
-### 4. Sharpness
-
-- **Sharpness:** Adjusts overall image sharpness using a convolution-based approach.
-
-### 5. Black & White Conversion
-
-- **Grayscale:** Converts the image to black and white.
-
-### 6. Film Grain
-
-- **Grain Strength:** Controls the intensity of added film grain.
-- **Grain Contrast:** Adjusts the contrast of the grain.
-- **Color Grain Mix:** Blends between monochromatic and colored grain.
-
-### 7. Masking
-
-- **Use Mask:** Applies adjustments only to the white areas of the mask.
-- **Invert Mask Influence:** Inverts the mask effect, applying adjustments to black areas.
-- **Mask Influence:** Controls the strength of the mask’s effect on adjustments (0–100%).
 
 ---
 
-## Usage
+## Core Objectives
 
-- **Input:** Image tensor (B, H, W, C).
-- **Parameters:** Adjustable via node UI for all features.
-- **Output:** Adjusted image tensor and mask tensor (for masking operations).
-- **Compatibility:** Works seamlessly with other ComfyUI nodes.
+### 1. **AI-Powered Automation**
+Make professional color grading accessible through intelligent automation that understands content, lighting, and artistic intent.
 
----
+### 2. **Artistic Content Focus**
+Specialize in enhancing concept art, anime, illustrations, and stylized content while maintaining excellent photographic support.
 
-## Proposed New Features
-
-### 1. Automatic Color Correction Based on Input Image
-
-- **Description:** Analyzes the input image (e.g., using histograms, dominant color, or perceptual analysis) and suggests or applies adjustments to achieve a balanced or stylized look.
-- **Implementation:** Add a new function to analyze the image and auto-adjust parameters, then integrate with the existing adjustment pipeline.
-
-### 2. Genre-Based Presets as Overrides
-
-- **Description:** Predefined parameter sets for popular genres/styles (e.g., “anime,” “film noir,” “vintage,” “digital art”) that can override manual settings.
-- **Implementation:** Add a dropdown or toggle for preset selection, mapping each genre to a set of adjustment values. Override manual settings when a preset is active.
+### 3. **Real-Time Workflow Integration**
+Seamlessly integrate with ComfyUI workflows with instant feedback and visual analysis tools.
 
 ---
 
-## Feature Comparison Table
+## Current Achievement Status
 
-| Feature                        | Current Status | Proposed Status                |
-|---------------------------------|----------------|-------------------------------|
-| Manual color correction         | Yes            | Yes (enhanced by presets)     |
-| Automatic correction (by image) | No             | Yes (new feature)             |
-| Genre/style presets             | No             | Yes (new feature)             |
+### ✅ **Completed Goals**
+
+#### **AI Analysis Pipeline**
+- [x] OpenCV-based face detection with SLIC segmentation
+- [x] Scene classification (6 types: anime, concept art, portraits, etc.)
+- [x] Lighting condition analysis (4 conditions)
+- [x] Edge-aware content type detection
+- [x] K-means color clustering in RGB and LAB spaces
+
+#### **Professional Color Science**
+- [x] LAB color space operations with Bradford chromatic adaptation
+- [x] 3-way color corrector (lift/gamma/gain)
+- [x] Perceptual gamma curves with edge preservation
+- [x] Advanced color matching with histogram and LAB methods
+- [x] Professional palette extraction with brightness sorting
+
+#### **Three Operation Modes**
+- [x] Auto Mode: AI-driven scene analysis and enhancement
+- [x] Preset Mode: 30 curated professional looks with AI adaptation
+- [x] Manual Mode: Full professional control with AI assistance
+
+#### **Advanced UI/UX**
+- [x] Real-time preview with selective node execution
+- [x] Dynamic mode-specific UI controls
+- [x] Visual outputs (histogram, color palette images)
+- [x] Graceful fallbacks for missing dependencies
+
+#### **Content-Aware Enhancement**
+- [x] Artistic content detection and specialized processing
+- [x] Skin tone preservation during face detection
+- [x] Enhanced processing for concept art and illustrations
+- [x] Adaptive strength based on content type
 
 ---
 
-## User Workflow Example
+## Current Roadmap & Future Goals
 
-1. **Load Image:** Connect image tensor to the node.
-2. **Adjust Parameters:** Manually set contrast, gamma, saturation, etc., or select a genre preset.
-3. **Automatic Correction:** (Optional) Enable automatic analysis to apply suggested adjustments.
-4. **Apply Mask:** (Optional) Use a mask for localized adjustments.
-5. **Output:** Receive the adjusted image and mask tensors for further processing.
+### 🎯 **Short-Term Goals (v1.1-1.2)**
+
+#### **Performance & Optimization**
+- [ ] Memory usage optimization for large images
+- [ ] GPU utilization improvements for complex operations
+- [ ] Batch processing optimization for multiple images
+- [ ] Caching system for repeated AI analysis
+
+#### **Enhanced AI Capabilities**
+- [ ] Improved anime/manga style detection
+- [ ] Advanced artistic style classification (oil painting, watercolor, digital art, etc.)
+- [ ] Content-aware masking for selective enhancements
+- [ ] Intelligent auto-cropping suggestion for composition
+
+#### **User Experience Improvements**
+- [ ] Preset favorites and custom preset saving
+- [ ] One-click preset application with live preview
+- [ ] Enhanced tooltips with before/after examples
+- [ ] Keyboard shortcuts for common operations
+
+### 🚀 **Medium-Term Goals (v1.3-1.5)**
+
+#### **Advanced Color Science**
+- [ ] ACES color space support for professional workflows
+- [ ] Advanced tone mapping for HDR content
+- [ ] Color harmony analysis and suggestions
+- [ ] Perceptual color difference calculations
+
+#### **Professional Features**
+- [ ] Advanced masking tools (luminosity, color range, gradient)
+- [ ] Multi-point curve adjustments
+- [ ] Professional LUT import/export
+- [ ] Color matching from reference images with region selection
+
+#### **AI Enhancement**
+- [ ] Deep learning-based enhancement models
+- [ ] Style transfer integration for artistic looks
+- [ ] Intelligent auto-exposure and contrast
+- [ ] Scene-aware noise reduction
+
+#### **Workflow Integration**
+- [x] Batch processing node for multiple images
+- [ ] Integration with other ComfyUI custom nodes
+- [ ] API for external tool integration
+- [ ] Cloud-based AI processing options
+
+### 🌟 **Long-Term Vision (v2.0+)**
+
+#### **Next-Generation AI**
+- [ ] Custom-trained models for artistic content enhancement
+- [ ] Real-time style adaptation based on artistic movements
+- [ ] Intelligent composition analysis and suggestions
+- [ ] Advanced facial feature enhancement with artistic consideration
+
+#### **Professional Studio Features**
+- [ ] Multi-layer adjustment system
+- [ ] Professional color grading workflows
+- [ ] Client review and approval system
+- [ ] Advanced color accuracy tools and calibration
+
+#### **Community & Ecosystem**
+- [ ] Community preset sharing platform
+- [ ] Plugin system for third-party enhancements
+- [ ] Educational resources and tutorials
+- [ ] Professional certification program
+
+
 
 ---
 
-## Technical Notes
-
-- **Backend:** PyTorch for GPU acceleration and tensor operations.
-- **Compatibility:** Designed for ComfyUI, supports batch processing.
-- **Extensibility:** New features can be added as modular functions within the existing codebase.
-
----
-
-*Project: ComfyUI-EasyColorCorrection*  
-*Version: 1.1.0 (example version, update as needed)*
-
----
+*Project: ComfyUI-EasyColorCorrector*  
+*Current Version: 1.2.0*  
+*Updated: June 2025*
