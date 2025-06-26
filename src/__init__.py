@@ -159,7 +159,10 @@ def extract_color_palette(
 def match_to_reference_colors(
     image_np: np.ndarray, reference_np: np.ndarray, strength: float = 0.5
 ) -> np.ndarray:
-    """Match image colors to reference image palette with robust error handling."""
+    """
+    Match image colors to reference using highlights/midtones/shadows LUT approach.
+    Works like professional color grading - matches colors in different luminance zones.
+    """
     if not ADVANCED_LIBS_AVAILABLE:
         return image_np
 
@@ -174,65 +177,73 @@ def match_to_reference_colors(
         if strength == 0.0:
             return image_np
 
-        matched_image = image_np.copy()
+        # Convert to float for processing
+        image_float = image_np.astype(np.float32) / 255.0
+        reference_float = reference_np.astype(np.float32) / 255.0
+        matched_image = image_float.copy()
 
-        for channel in range(3):
-            img_hist, _ = np.histogram(
-                image_np[:, :, channel].flatten(), bins=256, range=(0, 256)
-            )
-            ref_hist, _ = np.histogram(
-                reference_np[:, :, channel].flatten(), bins=256, range=(0, 256)
-            )
+        # Calculate luminance for zone segmentation
+        # Use proper luminance weights: 0.299*R + 0.587*G + 0.114*B
+        img_luminance = (
+            0.299 * image_float[:, :, 0] + 
+            0.587 * image_float[:, :, 1] + 
+            0.114 * image_float[:, :, 2]
+        )
+        ref_luminance = (
+            0.299 * reference_float[:, :, 0] + 
+            0.587 * reference_float[:, :, 1] + 
+            0.114 * reference_float[:, :, 2]
+        )
 
-            img_cdf = np.cumsum(img_hist).astype(np.float64)
-            ref_cdf = np.cumsum(ref_hist).astype(np.float64)
+        # Define luminance zones with smooth transitions
+        # Shadows: 0.0-0.33, Midtones: 0.33-0.66, Highlights: 0.66-1.0
+        shadow_mask = np.clip(1.0 - img_luminance / 0.33, 0.0, 1.0)
+        highlight_mask = np.clip((img_luminance - 0.66) / 0.34, 0.0, 1.0)
+        midtone_mask = 1.0 - shadow_mask - highlight_mask
+        midtone_mask = np.clip(midtone_mask, 0.0, 1.0)
 
-            img_cdf = img_cdf / (img_cdf[-1] + 1e-8)
-            ref_cdf = ref_cdf / (ref_cdf[-1] + 1e-8)
+        # For each zone, calculate average color shift from reference
+        for zone_name, zone_mask in [
+            ("shadows", shadow_mask),
+            ("midtones", midtone_mask), 
+            ("highlights", highlight_mask)
+        ]:
+            if np.sum(zone_mask) > 0:  # Only process if zone has pixels
+                
+                # Get pixels in this luminance zone
+                img_zone_mask = zone_mask > 0.1  # Threshold to avoid near-zero weights
+                ref_zone_mask = None
+                
+                # Find corresponding luminance zone in reference image
+                if zone_name == "shadows":
+                    ref_zone_mask = ref_luminance < 0.4
+                elif zone_name == "midtones":
+                    ref_zone_mask = (ref_luminance >= 0.3) & (ref_luminance <= 0.7)
+                else:  # highlights
+                    ref_zone_mask = ref_luminance > 0.6
+                
+                if np.sum(ref_zone_mask) > 0:  # Reference zone has pixels
+                    
+                    # Calculate average colors in this zone
+                    for channel in range(3):
+                        # Image zone average
+                        img_zone_pixels = matched_image[:, :, channel][img_zone_mask]
+                        img_zone_avg = np.mean(img_zone_pixels) if len(img_zone_pixels) > 0 else 0
+                        
+                        # Reference zone average  
+                        ref_zone_pixels = reference_float[:, :, channel][ref_zone_mask]
+                        ref_zone_avg = np.mean(ref_zone_pixels) if len(ref_zone_pixels) > 0 else 0
+                        
+                        # Calculate color shift for this zone
+                        color_shift = ref_zone_avg - img_zone_avg
+                        
+                        # Apply shift with zone mask and strength
+                        shift_amount = color_shift * strength * zone_mask[:, :, np.newaxis]
+                        matched_image[:, :, channel] += shift_amount.squeeze()
 
-            lookup_table = np.zeros(256, dtype=np.uint8)
-            for i in range(256):
-                closest_idx = np.argmin(np.abs(ref_cdf - img_cdf[i]))
-                lookup_table[i] = closest_idx
-
-            original_channel = image_np[:, :, channel]
-            matched_channel = lookup_table[original_channel]
-
-            blended_channel = (
-                original_channel * (1.0 - strength) + matched_channel * strength
-            )
-            matched_image[:, :, channel] = np.clip(blended_channel, 0, 255).astype(
-                np.uint8
-            )
-
-        if ADVANCED_LIBS_AVAILABLE and strength > 0.3:
-            try:
-                lab_image = cv2.cvtColor(matched_image, cv2.COLOR_RGB2LAB).astype(
-                    np.float32
-                )
-                lab_reference = cv2.cvtColor(reference_np, cv2.COLOR_RGB2LAB).astype(
-                    np.float32
-                )
-
-                for i in range(1, 3):
-                    img_mean = np.mean(lab_image[:, :, i])
-                    ref_mean = np.mean(lab_reference[:, :, i])
-
-                    color_shift = (ref_mean - img_mean) * strength * 0.3
-                    lab_image[:, :, i] = lab_image[:, :, i] + color_shift
-
-                lab_image[:, :, 0] = np.clip(lab_image[:, :, 0], 0, 100)
-                lab_image[:, :, 1] = np.clip(lab_image[:, :, 1], -127, 127)
-                lab_image[:, :, 2] = np.clip(lab_image[:, :, 2], -127, 127)
-
-                lab_image_uint8 = lab_image.astype(np.uint8)
-                matched_image = cv2.cvtColor(lab_image_uint8, cv2.COLOR_LAB2RGB)
-
-            except Exception:
-                pass
-
-        matched_image = np.clip(matched_image, 0, 255).astype(np.uint8)
-        return matched_image
+        # Clamp values and convert back to uint8
+        matched_image = np.clip(matched_image, 0.0, 1.0)
+        return (matched_image * 255.0).astype(np.uint8)
 
     except Exception:
         # Return original image if anything fails
@@ -601,6 +612,12 @@ def enhance_faces(
             final_mask = cv2.filter2D(final_mask, -1, kernel)
 
             final_mask = ndimage.gaussian_filter(final_mask, sigma=6.0)
+
+            # CRITICAL FIX: Prevent mask from affecting bright highlights (>85% luminance)
+            # This prevents green tints in bright non-skin areas
+            face_gray = cv2.cvtColor(face_region, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+            highlight_protection = np.where(face_gray > 0.85, 0.0, 1.0)
+            final_mask = final_mask * highlight_protection
 
             final_mask = np.clip(final_mask, 0.0, 1.0)
 
@@ -1280,6 +1297,30 @@ class EasyColorCorrection:
         original_image = image.clone()
         _, height, width, _ = image.shape
 
+        # Handle GPU processing based on user choice
+        device = get_preferred_device(use_gpu)
+        print(f"🔧 EasyColorCorrection Debug: use_gpu={use_gpu}, CUDA available={torch.cuda.is_available()}")
+        print(f"🔧 Input image device: {image.device}, target device: {device}")
+        
+        if use_gpu and torch.cuda.is_available():
+            if not str(image.device).startswith("cuda"):
+                print(f"🚀 Moving image to GPU: {device}")
+                image = image.to(device)
+                original_image = original_image.to(device)
+                if mask is not None:
+                    mask = mask.to(device)
+                    print(f"🚀 Moved mask to GPU: {device}")
+                if reference_image is not None:
+                    reference_image = reference_image.to(device)
+                    print(f"🚀 Moved reference image to GPU: {device}")
+                print(f"✅ Image now on device: {image.device}")
+            else:
+                print(f"✅ Image already on GPU: {image.device}")
+        elif use_gpu and not torch.cuda.is_available():
+            print("❌ GPU requested but CUDA not available - using CPU")
+        else:
+            print(f"💻 CPU processing selected - device: {device}")
+        
         # Cache for locked input - avoid reprocessing upstream when enabled
         if lock_input_image:
             # Check if the input image has changed (cache invalidation)
@@ -1312,11 +1353,10 @@ class EasyColorCorrection:
                 self._cached_analysis = None
 
         # --- SHARED AI ANALYSIS (available to all modes) ---
-        # Always create image_np for potential use in processing functions
-        image_np = (processed_image[0].cpu().numpy() * 255).astype(np.uint8)
-
         analysis = None
         if ai_analysis and ADVANCED_LIBS_AVAILABLE:
+            # Only create image_np when AI analysis is actually needed
+            image_np = (processed_image[0].cpu().numpy() * 255).astype(np.uint8)
             # Use cached analysis when input is locked
             if (
                 lock_input_image
@@ -1369,6 +1409,9 @@ class EasyColorCorrection:
                     )
                     image_np = edge_enhanced
                 if analysis["faces"] and adjust_for_skin_tone:
+                    # Warning for overdriven enhancement
+                    if enhancement_strength > 1.0:
+                        print(f"⚠️ WARNING: Enhancement strength ({enhancement_strength:.1f}) > 1.0 with skin tone adjustment may cause color artifacts in highlights. Recommended: ≤ 1.0")
                     face_enhanced = enhance_faces(
                         image_np, analysis["faces"], enhancement_strength * 0.5
                     )
@@ -1385,44 +1428,16 @@ class EasyColorCorrection:
                     "dominant_colors": [],
                 }
                 print("🔧 Basic Auto Mode: AI analysis disabled")
-                if white_balance_strength != 0.0:
-                    B, C = processed_image.shape[0], processed_image.shape[3]
-
-                    if white_balance_strength > 0.0:
-                        # Positive: traditional white balance (neutralize)
-                        flat_image = processed_image.view(B, -1, C)
-                        percentile_40 = torch.quantile(
-                            flat_image, 0.40, dim=1, keepdim=True
-                        )
-                        percentile_60 = torch.quantile(
-                            flat_image, 0.60, dim=1, keepdim=True
-                        )
-                        midtone_mean = (percentile_40 + percentile_60) / 2.0
-                        avg_gray = torch.mean(midtone_mean, dim=-1, keepdim=True)
-                        scale = avg_gray / (midtone_mean + 1e-6)
-                        scale = torch.lerp(
-                            torch.ones_like(scale), scale, white_balance_strength
-                        )
-                        scale = scale.view(B, 1, 1, C)
-                        color_deviation = torch.abs(scale - 1.0).max()
-                        if color_deviation > 0.05:
-                            processed_image = processed_image * scale
-                    else:
-                        # Negative: enhance cool tones (shift toward blue)
-                        abs_strength = abs(white_balance_strength)
-                        # Cool shift: reduce red, enhance blue
-                        cool_scale = torch.tensor(
-                            [0.95, 1.0, 1.08],
-                            device=processed_image.device,
-                            dtype=processed_image.dtype,
-                        )
-                        cool_scale = torch.lerp(
-                            torch.ones_like(cool_scale), cool_scale, abs_strength
-                        )
-                        cool_scale = cool_scale.view(1, 1, 1, 3)
-                        processed_image = processed_image * cool_scale
-
-                    processed_image = torch.clamp(processed_image, 0.0, 1.0)
+                # Use consistent white balance regardless of AI setting
+                if white_balance_strength != 0.0 and ADVANCED_LIBS_AVAILABLE:
+                    image_np = (processed_image[0].cpu().numpy() * 255).astype(np.uint8)
+                    wb_corrected = intelligent_white_balance(image_np, white_balance_strength)
+                    processed_image = (
+                        torch.from_numpy(wb_corrected.astype(np.float32) / 255.0)
+                        .unsqueeze(0)
+                        .to(processed_image.device)
+                    )
+                    print(f"🌡️ Applied white balance: {white_balance_strength:.2f} ({'warmer' if white_balance_strength > 0 else 'cooler' if white_balance_strength < 0 else 'neutral'})")
             hsv_enhanced = rgb_to_hsv(processed_image)
             h_enh, s_enh, v_enh = (
                 hsv_enhanced[..., 0],
@@ -1575,11 +1590,10 @@ class EasyColorCorrection:
         # --- ADVANCED COLOR PROCESSING (Preset and Manual modes) ---
         if mode != "Auto":
             # === INTELLIGENT WHITE BALANCE (if enabled) ===
-            if (
-                white_balance_strength != 0.0
-                and ai_analysis
-                and ADVANCED_LIBS_AVAILABLE
-            ):
+            if white_balance_strength != 0.0 and ADVANCED_LIBS_AVAILABLE:
+                # Create image_np if not already available (when AI analysis is disabled)
+                if not ai_analysis or 'image_np' not in locals():
+                    image_np = (processed_image[0].cpu().numpy() * 255).astype(np.uint8)
                 wb_corrected = intelligent_white_balance(
                     image_np, white_balance_strength
                 )
@@ -1588,6 +1602,7 @@ class EasyColorCorrection:
                     .unsqueeze(0)
                     .to(processed_image.device)
                 )
+                print(f"🌡️ Applied white balance: {white_balance_strength:.2f} ({'warmer' if white_balance_strength > 0 else 'cooler' if white_balance_strength < 0 else 'neutral'})")
 
             # === FACE-AWARE PROCESSING ===
             if (
@@ -1596,6 +1611,9 @@ class EasyColorCorrection:
                 and adjust_for_skin_tone
                 and ADVANCED_LIBS_AVAILABLE
             ):
+                # Warning for overdriven enhancement
+                if enhancement_strength > 1.0:
+                    print(f"⚠️ WARNING: Enhancement strength ({enhancement_strength:.1f}) > 1.0 with skin tone adjustment may cause color artifacts in highlights. Recommended: ≤ 1.0")
                 face_enhanced = enhance_faces(
                     image_np, analysis["faces"], enhancement_strength * 0.3
                 )
@@ -1718,23 +1736,34 @@ class EasyColorCorrection:
                     highlights_mask = torch.clamp((v - 0.66) * 3.0, 0.0, 1.0)
 
                 # === 3-WAY COLOR CORRECTION (Lift/Gamma/Gain) ===
+                corrections_applied = []
                 if lift != 0.0:
-                    # Shadows (lift) - reduced strength for better control
-                    lift_strength = 0.3  # Reduced from 0.4-0.5 for more subtle control
+                    # Shadows (lift) - increased strength for noticeable effect
+                    lift_strength = 0.8  # Increased for more visible control
                     v = v + (lift * lift_strength * shadows_mask)
+                    corrections_applied.append(f"lift: {lift:.2f}")
 
                 if gamma != 0.0:
-                    # Midtones (gamma) - reduced strength for better control
+                    # Midtones (gamma) - increased strength for noticeable effect  
                     gamma_exp = 1.0 / (
-                        1.0 + gamma * 0.6
-                    )  # Reduced from 0.8-1.0 for more subtle control
+                        1.0 + gamma * 1.2
+                    )  # Increased for more visible control
                     v_gamma = torch.pow(torch.clamp(v, 0.001, 1.0), gamma_exp)
                     v = torch.lerp(v, v_gamma, midtones_mask)
+                    corrections_applied.append(f"gamma: {gamma:.2f}")
 
                 if gain != 0.0:
-                    # Highlights (gain) - reduced strength for better control
-                    gain_strength = 0.3  # Reduced from 0.4-0.5 for more subtle control
+                    # Highlights (gain) - increased strength for noticeable effect
+                    gain_strength = 0.8  # Increased for more visible control
                     v = v + (gain * gain_strength * highlights_mask)
+                    corrections_applied.append(f"gain: {gain:.2f}")
+                
+                if corrections_applied:
+                    print(f"🎛️ 3-way color correction applied: {', '.join(corrections_applied)}")
+
+                # Convert modified HSV back to RGB after lift/gamma/gain processing
+                processed_image = hsv_to_rgb(torch.stack([h, s, v], dim=-1))
+                processed_image = torch.clamp(processed_image, 0.0, 1.0)
 
                 if noise > 0.0:
                     mono_noise = torch.randn(
@@ -2068,7 +2097,7 @@ class BatchColorCorrection:
                 "use_gpu": (
                     "BOOLEAN",
                     {
-                        "default": False,
+                        "default": True,
                         "tooltip": "⚠️ GPU: Faster processing but uses significant VRAM (2-8GB+ for large batches). CPU: Slower but uses system RAM instead of VRAM.",
                     },
                 ),
@@ -2188,7 +2217,7 @@ class BatchColorCorrection:
         images,
         mode="Auto",
         frames_per_batch=16,
-        use_gpu=False,
+        use_gpu=True,
         ai_analysis=True,
         preset="Natural",
         effect_strength=0.4,
@@ -2654,6 +2683,9 @@ class BatchColorCorrection:
                 print(
                     f"👤 Applying face enhancement to batch with {len(analysis['faces'])} faces detected"
                 )
+                # Warning for overdriven enhancement
+                if enhancement_strength > 1.0:
+                    print(f"⚠️ WARNING: Enhancement strength ({enhancement_strength:.1f}) > 1.0 with skin tone adjustment may cause color artifacts in highlights. Recommended: ≤ 1.0")
                 face_enhanced_frames = []
 
                 for i in range(batch_size):
@@ -2699,15 +2731,15 @@ class BatchColorCorrection:
             highlights_mask = torch.clamp((v - 0.66) * 3.0, 0.0, 1.0)
 
             if lift != 0.0:
-                v = v + (lift * 0.4 * shadows_mask)
+                v = v + (lift * 0.8 * shadows_mask)
 
             if gamma != 0.0:
-                gamma_exp = 1.0 / (1.0 + gamma * 0.8)
+                gamma_exp = 1.0 / (1.0 + gamma * 1.2)
                 v_gamma = torch.pow(torch.clamp(v, 0.001, 1.0), gamma_exp)
                 v = torch.lerp(v, v_gamma, midtones_mask)
 
             if gain != 0.0:
-                v = v + (gain * 0.4 * highlights_mask)
+                v = v + (gain * 0.8 * highlights_mask)
 
         # Add noise to entire batch if specified
         if noise > 0.0:
