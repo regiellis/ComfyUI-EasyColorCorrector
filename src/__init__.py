@@ -2057,7 +2057,13 @@ class BatchColorCorrection:
                 "mode": (["Auto", "Preset", "Manual"], {"default": "Auto"}),
                 "frames_per_batch": (
                     "INT",
-                    {"default": 16, "min": 1, "max": 64, "step": 1},
+                    {
+                        "default": 16, 
+                        "min": 1, 
+                        "max": 64, 
+                        "step": 1,
+                        "tooltip": "🎯 Batch Size Guide:\n1-4: Best Quality but Slow (high memory per frame)\n8-16: Balanced Speed & Quality (recommended)\n32-64: Fastest but Resource Heavy (requires more VRAM)"
+                    },
                 ),
                 "use_gpu": (
                     "BOOLEAN",
@@ -2305,6 +2311,9 @@ class BatchColorCorrection:
                     ai_analysis=ai_analysis,
                     preset=preset,
                     effect_strength=effect_strength,
+                    enhancement_strength=enhancement_strength,
+                    adjust_for_skin_tone=adjust_for_skin_tone,
+                    white_balance_strength=white_balance_strength,
                     warmth=warmth,
                     vibrancy=vibrancy,
                     brightness=brightness,
@@ -2445,6 +2454,9 @@ class BatchColorCorrection:
         ai_analysis,
         preset,
         effect_strength,
+        enhancement_strength,
+        adjust_for_skin_tone,
+        white_balance_strength,
         warmth,
         vibrancy,
         brightness,
@@ -2578,9 +2590,13 @@ class BatchColorCorrection:
                     hsv_temp[..., 2],
                 )
 
+                # Initialize variables with defaults
+                scene_type = "general"
+                lighting = "auto"
+                
                 if analysis:
                     scene_type = analysis["scene_type"]
-                    lighting = analysis["lighting"]
+                    lighting = analysis["lighting_condition"]
 
                     # Scene-specific enhancements
                     if scene_type == "anime":
@@ -3360,8 +3376,7 @@ class ColorCorrectionViewer:
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "INT", "FLOAT")
-    RETURN_NAMES = ("images", "frame_count", "duration")
+    RETURN_TYPES = ()
     FUNCTION = "view_sequence"
     CATEGORY = "itsjustregi / Easy Color Correction"
     OUTPUT_NODE = True
@@ -3370,17 +3385,13 @@ class ColorCorrectionViewer:
     def IS_CHANGED(cls, **kwargs):
         return float("NaN")  # Always update for video display
 
-    @classmethod
-    def VALIDATE_INPUTS(cls, **kwargs):
-        return True
-
     def view_sequence(self, images, fps=24.0, auto_play=True, loop=True, frame_skip=1):
         """
         Display image sequence with video playback controls.
         """
         if images is None or images.shape[0] == 0:
             print("⚠️ No images provided to viewer")
-            return (images, 0, 0.0)
+            return {"ui": {"text": "No images provided"}}
 
         total_frames = images.shape[0]
 
@@ -3392,15 +3403,132 @@ class ColorCorrectionViewer:
 
         duration = total_frames / fps
 
+        # For ComfyUI OUTPUT_NODE, we need to save images to ComfyUI's output directory
+        import os
+        import time
+        from PIL import Image
+        import folder_paths
+        
+        # Create subfolder first so we can reference it
+        output_dir = folder_paths.get_output_directory()
+        subfolder = f"colorviewer_{int(time.time())}"
+        full_output_dir = os.path.join(output_dir, subfolder)
+        os.makedirs(full_output_dir, exist_ok=True)
+
         print(f"🎬 Color Correction Viewer: {total_frames} frames at {fps} FPS")
         print(f"⏱️ Duration: {duration:.2f} seconds")
         print(f"🔄 Auto-play: {auto_play}, Loop: {loop}")
         if frame_skip > 1:
             print(f"⏭️ Frame skip: every {frame_skip} frames")
+        
+        # Store cleanup info for the deletion endpoint
+        self._last_subfolder = subfolder
+        
+        results = []
+        
+        for i in range(total_frames):
+            # Convert tensor to numpy and ensure proper format
+            img_tensor = images[i]  # Single image
+            img_np = img_tensor.cpu().numpy()
+            
+            # Ensure values are in 0-255 range and uint8
+            if img_np.max() <= 1.0:
+                img_np = (img_np * 255).astype(np.uint8)
+            else:
+                img_np = img_np.astype(np.uint8)
+            
+            # Save image to ComfyUI output directory
+            img_pil = Image.fromarray(img_np, 'RGB')
+            filename = f"frame_{i:04d}.png"
+            img_path = os.path.join(full_output_dir, filename)
+            img_pil.save(img_path)
+            
+            # Add image info in ComfyUI format
+            results.append({
+                "filename": filename,
+                "subfolder": subfolder,
+                "type": "output"
+            })
 
-        # For ComfyUI preview, we need to return the images
-        # The frontend will handle the video player widget
-        return (images, total_frames, duration)
+        # Create a simple GIF for video preview (following VideoHelperSuite pattern)
+        if total_frames > 1:
+            # Create animated GIF from frames
+            gif_filename = f"preview_{int(time.time())}.gif"
+            gif_path = os.path.join(full_output_dir, gif_filename)
+            
+            try:
+                # Convert images to PIL Images for GIF creation
+                pil_images = []
+                for filename_info in results:
+                    img_path = os.path.join(full_output_dir, filename_info["filename"])
+                    pil_img = Image.open(img_path)
+                    pil_images.append(pil_img)
+                
+                # Create animated GIF
+                if pil_images:
+                    duration_ms = int(1000 / fps)  # Convert to milliseconds
+                    pil_images[0].save(
+                        gif_path,
+                        save_all=True,
+                        append_images=pil_images[1:],
+                        duration=duration_ms,
+                        loop=0 if loop else 1
+                    )
+                    
+                    # Use VideoHelperSuite format for video preview
+                    preview = {
+                        "filename": gif_filename,
+                        "subfolder": subfolder,
+                        "type": "output",
+                        "format": "gif",
+                        "frame_rate": fps,
+                        "frame_count": total_frames,
+                        "duration": duration
+                    }
+                    
+                    print(f"🎬 Created animated preview: {gif_filename}")
+                    
+                    return {
+                        "ui": {
+                            "gifs": [preview],  # Use VideoHelperSuite's "gifs" format
+                            "images": results,   # Keep individual frames for compatibility
+                        }
+                    }
+                    
+            except Exception as e:
+                print(f"⚠️ Failed to create GIF preview: {e}")
+        
+        # Fallback for single images or if GIF creation fails
+        return {
+            "ui": {
+                "images": results,
+                "frame_count": [total_frames],
+                "duration": [duration], 
+                "fps": [fps],
+                "subfolder": [subfolder]
+            }
+        }
+    
+    @classmethod
+    def cleanup_images(cls, subfolder):
+        """Clean up generated images from a specific subfolder"""
+        try:
+            import folder_paths
+            import shutil
+            
+            output_dir = folder_paths.get_output_directory()
+            full_path = os.path.join(output_dir, subfolder)
+            
+            if os.path.exists(full_path):
+                shutil.rmtree(full_path)
+                print(f"🗑️ Cleaned up {subfolder} directory")
+                return True
+            else:
+                print(f"⚠️ Directory {subfolder} not found")
+                return False
+        except Exception as e:
+            print(f"❌ Cleanup failed: {e}")
+            return False
 
 
 # Export all classes
