@@ -3540,6 +3540,81 @@ class ColorCorrectionViewer:
                 "subfolder": [subfolder]
             }
         }
+
+
+class ColorPaletteExtractor:
+    """
+    Extracts color palette from an image for use as reference input.
+    Creates the same palette format used by the main EasyColorCorrection node.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "palette_size": ("INT", {"default": 8, "min": 3, "max": 16, "step": 1}),
+                "extract_palette": ("BOOLEAN", {"default": True}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "IMAGE", "IMAGE")
+    RETURN_NAMES = ("palette_data", "histogram", "palette_image")
+    FUNCTION = "extract_palette"
+    CATEGORY = "itsjustregi / Easy Color Corrector"
+
+    def extract_palette(self, image, palette_size=8, extract_palette=True):
+        """
+        Extract color palette from input image.
+        Returns palette data string, histogram visualization, and palette image.
+        """
+        if not extract_palette:
+            # Return empty/default outputs when disabled
+            empty_image = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+            return ("No palette extracted", empty_image, empty_image)
+
+        try:
+            # Convert image to numpy for processing
+            image_np = (image[0].cpu().numpy() * 255).astype(np.uint8)
+            
+            # Extract hex color palette
+            hex_colors = extract_color_palette(image_np, num_colors=palette_size)
+            
+            # Create palette data string (same format as main node)
+            if hex_colors:
+                palette_data = ", ".join(hex_colors)
+            else:
+                palette_data = "No palette extracted"
+            
+            # Generate histogram image
+            if ADVANCED_LIBS_AVAILABLE:
+                histogram_image = generate_histogram_image(image_np)
+                histogram_tensor = torch.from_numpy(histogram_image.astype(np.float32) / 255.0).unsqueeze(0)
+            else:
+                # Create simple fallback histogram
+                histogram_tensor = torch.zeros((1, 512, 768, 3), dtype=torch.float32)
+                print("⚠️ Histogram generation disabled - missing OpenCV")
+            
+            # Generate palette image
+            if hex_colors:
+                palette_image = generate_palette_image(hex_colors)
+                palette_tensor = torch.from_numpy(palette_image.astype(np.float32) / 255.0).unsqueeze(0)
+            else:
+                # Create empty palette image if no colors extracted
+                palette_tensor = torch.zeros((1, 120, 600, 3), dtype=torch.float32)
+            
+            print(f"🎨 Extracted {len(hex_colors)}-color palette: {palette_data}")
+            
+            return (palette_data, histogram_tensor, palette_tensor)
+            
+        except Exception as e:
+            print(f"❌ ColorPaletteExtractor error: {e}")
+            import traceback
+            traceback.print_exc()
+            # Return safe fallback
+            empty_histogram = torch.zeros((1, 512, 768, 3), dtype=torch.float32)
+            empty_palette = torch.zeros((1, 120, 600, 3), dtype=torch.float32)
+            return ("Palette extraction failed", empty_histogram, empty_palette)
     
     @classmethod
     def cleanup_images(cls, subfolder):
