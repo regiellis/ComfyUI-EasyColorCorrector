@@ -2283,11 +2283,15 @@ class BatchColorCorrection:
         )
         print(f"📊 Processing in batches of {frames_per_batch} frames")
 
-        # Prepare output containers on GPU
-        processed_frames = []
+        # Pre-allocate output tensor to avoid OOM from torch.cat
+        _, height, width, channels = images.shape
+        final_images = torch.zeros((total_frames, height, width, channels), device=device, dtype=images.dtype)
+        
+        # Lists for metadata (much smaller memory footprint)
         all_palette_data = []
         all_histograms = []
         all_palette_images = []
+        processed_count = 0
 
         # Process frames in GPU-optimized batches with interruption support
         try:
@@ -2298,18 +2302,17 @@ class BatchColorCorrection:
                 if model_management.interrupt_processing:
                     print("🛑 Batch processing interrupted by user")
                     # Return partially processed results
-                    if processed_frames:
-                        partial_images = torch.cat(processed_frames, dim=0)
-                        partial_count = partial_images.shape[0]
+                    if processed_count > 0:
+                        partial_images = final_images[:processed_count]
                         print(
-                            f"⚠️ Partial result: {partial_count}/{total_frames} frames processed"
+                            f"⚠️ Partial result: {processed_count}/{total_frames} frames processed"
                         )
                         return (
                             partial_images,
                             "",
                             torch.zeros((1, 512, 768, 3), device=device),
                             torch.zeros((1, 120, 600, 3), device=device),
-                            partial_count,
+                            processed_count,
                         )
                     else:
                         return (
@@ -2354,7 +2357,9 @@ class BatchColorCorrection:
                     device=device,
                 )
 
-                processed_frames.append(batch_processed)
+                # Copy batch results directly into pre-allocated tensor
+                final_images[batch_start:batch_end] = batch_processed
+                processed_count = batch_end
 
                 # Only extract palette from middle frame to avoid CPU overhead
                 if extract_palette and batch_start <= total_frames // 2 < batch_end:
@@ -2374,18 +2379,17 @@ class BatchColorCorrection:
 
         except KeyboardInterrupt:
             print("🛑 Batch processing interrupted by KeyboardInterrupt")
-            if processed_frames:
-                partial_images = torch.cat(processed_frames, dim=0)
-                partial_count = partial_images.shape[0]
+            if processed_count > 0:
+                partial_images = final_images[:processed_count]
                 print(
-                    f"⚠️ Partial result: {partial_count}/{total_frames} frames processed"
+                    f"⚠️ Partial result: {processed_count}/{total_frames} frames processed"
                 )
                 return (
                     partial_images,
                     "",
                     torch.zeros((1, 512, 768, 3), device=device),
                     torch.zeros((1, 120, 600, 3), device=device),
-                    partial_count,
+                    processed_count,
                 )
             else:
                 return (
@@ -2397,18 +2401,17 @@ class BatchColorCorrection:
                 )
         except Exception as e:
             print(f"❌ Error during batch processing: {e}")
-            if processed_frames:
-                partial_images = torch.cat(processed_frames, dim=0)
-                partial_count = partial_images.shape[0]
+            if processed_count > 0:
+                partial_images = final_images[:processed_count]
                 print(
-                    f"⚠️ Partial result after error: {partial_count}/{total_frames} frames processed"
+                    f"⚠️ Partial result after error: {processed_count}/{total_frames} frames processed"
                 )
                 return (
                     partial_images,
                     "",
                     torch.zeros((1, 512, 768, 3), device=device),
                     torch.zeros((1, 120, 600, 3), device=device),
-                    partial_count,
+                    processed_count,
                 )
             else:
                 return (
@@ -2419,9 +2422,8 @@ class BatchColorCorrection:
                     0,
                 )
 
-        # Combine all processed frames on GPU
-        if processed_frames:
-            final_images = torch.cat(processed_frames, dim=0)
+        # Processing completed successfully
+        if processed_count == total_frames:
 
             # Use middle frame data for representation
             representative_palette = all_palette_data[0] if all_palette_data else ""

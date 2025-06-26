@@ -2,7 +2,7 @@
 [project]
 name = "ComfyUI-EasyColorCorrector"
 description = "ComfyUI custom node for flexible and efficient image color correction and post-processing."
-version = "1.2.3"
+version = "1.2.4"
 
 license = {text = "MIT"}
 dependencies  = [
