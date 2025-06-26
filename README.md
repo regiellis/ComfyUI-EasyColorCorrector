@@ -6,6 +6,7 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![ComfyUI](https://img.shields.io/badge/ComfyUI-Compatible-brightgreen.svg)](https://github.com/comfyanonymous/ComfyUI)
 
+
 >[!WARNING]
 > Release v1.2.1 introduces **major refactoring** and **enhancements** and a need name change to **ComfyUI-EasyColorCorrector**. This is a **breaking change** and you will may need to uninstall the old node before installing the new one.
 
