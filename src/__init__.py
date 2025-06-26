@@ -1005,11 +1005,11 @@ class EasyColorCorrection:
                         "tooltip": "📊 Extract and display dominant color palette",
                     },
                 ),
-                "realtime_preview": (
+                "lock_input_image": (
                     "BOOLEAN",
                     {
                         "default": False,
-                        "tooltip": "Enable real-time preview when adjusting parameters",
+                        "tooltip": "🔒 Lock input image to prevent upstream nodes from reprocessing when adjusting color parameters",
                     },
                 ),
                 "ai_analysis": (
@@ -1239,8 +1239,8 @@ class EasyColorCorrection:
     RETURN_TYPES = ("IMAGE", "STRING", "IMAGE", "IMAGE")
     RETURN_NAMES = ("image", "palette_data", "histogram", "palette_image")
     FUNCTION = "run"
-    CATEGORY = "itsjustregi / Easy Color Correction"
-    DISPLAY_NAME = "Easy Color Correction"
+    CATEGORY = "itsjustregi / Easy Color Corrector"
+    DISPLAY_NAME = "Easy Color Corrector"
 
     def run(
         self,
@@ -1249,7 +1249,7 @@ class EasyColorCorrection:
         reference_image: typing.Optional[torch.Tensor] = None,
         reference_strength: float = 0.3,
         extract_palette: bool = False,
-        realtime_preview: bool = False,
+        lock_input_image: bool = False,
         ai_analysis: bool = True,
         adjust_for_skin_tone: bool = False,
         white_balance_strength: float = 0.0,
@@ -1280,8 +1280,8 @@ class EasyColorCorrection:
         original_image = image.clone()
         _, height, width, _ = image.shape
 
-        # Cache for realtime preview - avoid reprocessing upstream when enabled
-        if realtime_preview:
+        # Cache for locked input - avoid reprocessing upstream when enabled
+        if lock_input_image:
             # Check if the input image has changed (cache invalidation)
             image_changed = False
             if (
@@ -1301,12 +1301,12 @@ class EasyColorCorrection:
             if image_changed:
                 self._cached_original_image = original_image.clone()
                 self._cached_analysis = None
-                print("🔄 Realtime Preview: New image detected, updating cache")
+                print("🔄 Locked Input: New image detected, updating cache")
 
             processed_image = self._cached_original_image.clone()
         else:
             processed_image = image.clone()
-            # Clear cache when not in realtime mode
+            # Clear cache when input is not locked
             if hasattr(self, "_cached_original_image"):
                 self._cached_original_image = None
                 self._cached_analysis = None
@@ -1317,9 +1317,9 @@ class EasyColorCorrection:
 
         analysis = None
         if ai_analysis and ADVANCED_LIBS_AVAILABLE:
-            # Use cached analysis in realtime preview mode
+            # Use cached analysis when input is locked
             if (
-                realtime_preview
+                lock_input_image
                 and hasattr(self, "_cached_analysis")
                 and self._cached_analysis is not None
             ):
@@ -1328,11 +1328,11 @@ class EasyColorCorrection:
                 analysis = analyze_image_content(
                     image_np, get_preferred_device(use_gpu)
                 )
-                if realtime_preview:
+                if lock_input_image:
                     self._cached_analysis = analysis
 
             print(
-                f"🤖 AI Analysis{'(cached)' if realtime_preview and hasattr(self, '_cached_analysis') else ''} for {mode} Mode: {analysis['scene_type']} scene, {analysis['lighting']} lighting, {len(analysis['faces'])} faces detected"
+                f"🤖 AI Analysis{'(cached)' if lock_input_image and hasattr(self, '_cached_analysis') else ''} for {mode} Mode: {analysis['scene_type']} scene, {analysis['lighting']} lighting, {len(analysis['faces'])} faces detected"
             )
         else:
             # Provide fallback analysis for non-AI modes
@@ -2042,7 +2042,7 @@ class EasyColorCorrection:
 
 class BatchColorCorrection:
     """
-    Batch Color Correction node for processing video frame sequences from VHS upload nodes.
+    Batch Color Corrector node for processing video frame sequences from VHS upload nodes.
     Processes multiple frames efficiently while maintaining consistency across the sequence.
     """
 
@@ -2174,14 +2174,14 @@ class BatchColorCorrection:
         "frame_count",
     )
     FUNCTION = "batch_color_correct"
-    CATEGORY = "itsjustregi / Easy Color Correction"
+    CATEGORY = "itsjustregi / Easy Color Corrector"
     OUTPUT_NODE = True
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):
         return float("NaN")  # Always update for video previews
 
-    DISPLAY_NAME = "Batch Color Correction"
+    DISPLAY_NAME = "Batch Color Corrector"
 
     def batch_color_correct(
         self,
@@ -2250,7 +2250,7 @@ class BatchColorCorrection:
             gpu_memory_before = 0
 
         print(
-            f"🎬 GPU Batch Color Correction: Processing {total_frames} frames ({frame_width}x{frame_height}) on {device}"
+            f"🎬 GPU Batch Color Corrector: Processing {total_frames} frames ({frame_width}x{frame_height}) on {device}"
         )
         print(f"📊 Processing in batches of {frames_per_batch} frames")
 
@@ -2923,7 +2923,7 @@ class RawImageProcessor:
     RETURN_TYPES = ("IMAGE", "STRING")
     RETURN_NAMES = ("image", "metadata")
     FUNCTION = "process_raw_image"
-    CATEGORY = "itsjustregi / Easy Color Correction"
+    CATEGORY = "itsjustregi / Easy Color Corrector"
 
     def process_raw_image(
         self,
@@ -3378,7 +3378,7 @@ class ColorCorrectionViewer:
 
     RETURN_TYPES = ()
     FUNCTION = "view_sequence"
-    CATEGORY = "itsjustregi / Easy Color Correction"
+    CATEGORY = "itsjustregi / Easy Color Corrector"
     OUTPUT_NODE = True
 
     @classmethod
@@ -3415,7 +3415,7 @@ class ColorCorrectionViewer:
         full_output_dir = os.path.join(output_dir, subfolder)
         os.makedirs(full_output_dir, exist_ok=True)
 
-        print(f"🎬 Color Correction Viewer: {total_frames} frames at {fps} FPS")
+        print(f"🎬 Color Corrector Viewer: {total_frames} frames at {fps} FPS")
         print(f"⏱️ Duration: {duration:.2f} seconds")
         print(f"🔄 Auto-play: {auto_play}, Loop: {loop}")
         if frame_skip > 1:

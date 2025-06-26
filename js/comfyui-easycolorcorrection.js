@@ -43,7 +43,7 @@ function showNotification(message, type = "info") {
 			if (type === "error" || type === "important") {
 				app.extensionManager.toast.add({
 					severity: type === "error" ? "error" : "warn",
-					summary: "Easy Color Correction",
+					summary: "Easy Color Corrector",
 					detail: message,
 					life: 5000
 				});
@@ -101,7 +101,7 @@ app.registerExtension({
 		// Register settings when extension loads
 		app.ui.settings.addSetting({
 			id: "EasyColorCorrection.notifications",
-			name: "🎨 Easy Color Correction: Notification Level",
+			name: "🎨 Easy Color Corrector: Notification Level",
 			type: "combo",
 			options: [
 				{ value: SETTINGS.NOTIFICATIONS.NONE, text: "None - No notifications" },
@@ -109,12 +109,12 @@ app.registerExtension({
 				{ value: SETTINGS.NOTIFICATIONS.FULL, text: "Full - All notifications (default)" }
 			],
 			defaultValue: SETTINGS.NOTIFICATIONS.FULL,
-			tooltip: "Control how many notifications Easy Color Correction shows"
+			tooltip: "Control how many notifications Easy Color Corrector shows"
 		});
 		
 		app.ui.settings.addSetting({
 			id: "EasyColorCorrection.auto_enable_preview",
-			name: "🎨 Easy Color Correction: Auto-Enable Preview",
+			name: "🎨 Easy Color Corrector: Auto-Enable Preview",
 			type: "boolean",
 			defaultValue: true,
 			tooltip: "Automatically enable real-time preview for new nodes"
@@ -122,7 +122,7 @@ app.registerExtension({
 		
 		app.ui.settings.addSetting({
 			id: "EasyColorCorrection.preview_quality",
-			name: "🎨 Easy Color Correction: Preview Quality",
+			name: "🎨 Easy Color Corrector: Preview Quality",
 			type: "combo",
 			options: [
 				{ value: "low", text: "Low - Faster preview" },
@@ -135,7 +135,7 @@ app.registerExtension({
 		
 		app.ui.settings.addSetting({
 			id: "EasyColorCorrection.auto_gpu_detection",
-			name: "🎨 Easy Color Correction: Auto GPU Detection",
+			name: "🎨 Easy Color Corrector: Auto GPU Detection",
 			type: "boolean",
 			defaultValue: true,
 			tooltip: "Automatically detect and suggest GPU usage for batch processing"
@@ -143,7 +143,7 @@ app.registerExtension({
 		
 		app.ui.settings.addSetting({
 			id: "EasyColorCorrection.prefer_cpu_processing",
-			name: "🎨 Easy Color Correction: Prefer CPU Processing",
+			name: "🎨 Easy Color Corrector: Prefer CPU Processing",
 			type: "boolean",
 			defaultValue: false,
 			tooltip: "Default to CPU processing for new batch nodes (saves VRAM)"
@@ -151,7 +151,7 @@ app.registerExtension({
 		
 		app.ui.settings.addSetting({
 			id: "EasyColorCorrection.batch_processing_size",
-			name: "🎨 Easy Color Correction: Batch Size Warning Threshold",
+			name: "🎨 Easy Color Corrector: Batch Size Warning Threshold",
 			type: "number",
 			defaultValue: 100,
 			min: 10,
@@ -162,7 +162,7 @@ app.registerExtension({
 		
 		app.ui.settings.addSetting({
 			id: "EasyColorCorrection.show_processing_time",
-			name: "🎨 Easy Color Correction: Show Processing Time",
+			name: "🎨 Easy Color Corrector: Show Processing Time",
 			type: "boolean",
 			defaultValue: true,
 			tooltip: "Display processing time in notifications"
@@ -170,7 +170,7 @@ app.registerExtension({
 		
 		app.ui.settings.addSetting({
 			id: "EasyColorCorrection.debug_mode",
-			name: "🎨 Easy Color Correction: Debug Mode",
+			name: "🎨 Easy Color Corrector: Debug Mode",
 			type: "boolean",
 			defaultValue: false,
 			tooltip: "Enable detailed console logging for debugging"
@@ -547,14 +547,14 @@ app.registerExtension({
 
 				const node = this;
 				const modeWidget = node.widgets.find(w => w.name === "mode");
-				const realtimeWidget = node.widgets.find(w => w.name === "realtime_preview");
+				const lockInputWidget = node.widgets.find(w => w.name === "lock_input_image");
 				const useGpuWidget = node.widgets.find(w => w.name === "use_gpu");
 				
 				// Apply global settings to new nodes
-				if (realtimeWidget) {
-					const autoEnablePreview = app.ui.settings.getSettingValue("EasyColorCorrection.auto_enable_preview", true);
+				if (lockInputWidget) {
+					const autoEnablePreview = app.ui.settings.getSettingValue("EasyColorCorrection.auto_enable_preview", false);
 					if (autoEnablePreview) {
-						realtimeWidget.value = true;
+						lockInputWidget.value = true;
 					}
 				}
 				
@@ -569,7 +569,7 @@ app.registerExtension({
                 const allWidgets = {
                     reference_strength: node.widgets.find(w => w.name === "reference_strength"),
                     extract_palette: node.widgets.find(w => w.name === "extract_palette"),
-                    realtime_preview: node.widgets.find(w => w.name === "realtime_preview"),
+                    lock_input_image: node.widgets.find(w => w.name === "lock_input_image"),
                     ai_analysis: node.widgets.find(w => w.name === "ai_analysis"),
                     adjust_for_skin_tone: node.widgets.find(w => w.name === "adjust_for_skin_tone"),
                     white_balance_strength: node.widgets.find(w => w.name === "white_balance_strength"),
@@ -607,10 +607,10 @@ app.registerExtension({
 
                 // Configuration defining which widgets are visible in each mode
                 const visibilityConfig = {
-                    "Auto": ["reference_strength", "extract_palette", "realtime_preview", "ai_analysis", "adjust_for_skin_tone", "white_balance_strength", "enhancement_strength", "pop_factor", "effect_strength", "use_gpu"],
-                    "Preset": ["reference_strength", "extract_palette", "realtime_preview", "ai_analysis", "adjust_for_skin_tone", "white_balance_strength", "enhancement_strength", "preset", "variation", "effect_strength", "use_gpu"],
-                    "Manual": ["reference_strength", "extract_palette", "realtime_preview", "ai_analysis", "adjust_for_skin_tone", "white_balance_strength", "enhancement_strength", "warmth", "vibrancy", "contrast", "brightness", "tint", "lift", "gamma", "gain", "noise", "effect_strength", "use_gpu"],
-                    "Colorize": ["reference_strength", "extract_palette", "realtime_preview", "ai_analysis", "adjust_for_skin_tone", "colorize_strength", "skin_warmth", "sky_saturation", "vegetation_green", "sepia_tone", "colorize_mode", "effect_strength", "use_gpu"],
+                    "Auto": ["reference_strength", "extract_palette", "lock_input_image", "ai_analysis", "adjust_for_skin_tone", "white_balance_strength", "enhancement_strength", "pop_factor", "effect_strength", "use_gpu"],
+                    "Preset": ["reference_strength", "extract_palette", "lock_input_image", "ai_analysis", "adjust_for_skin_tone", "white_balance_strength", "enhancement_strength", "preset", "variation", "effect_strength", "use_gpu"],
+                    "Manual": ["reference_strength", "extract_palette", "lock_input_image", "ai_analysis", "adjust_for_skin_tone", "white_balance_strength", "enhancement_strength", "warmth", "vibrancy", "contrast", "brightness", "tint", "lift", "gamma", "gain", "noise", "effect_strength", "use_gpu"],
+                    "Colorize": ["reference_strength", "extract_palette", "lock_input_image", "ai_analysis", "adjust_for_skin_tone", "colorize_strength", "skin_warmth", "sky_saturation", "vegetation_green", "sepia_tone", "colorize_mode", "effect_strength", "use_gpu"],
                 };
 
                 // Real-time preview functionality
@@ -692,7 +692,7 @@ app.registerExtension({
                         // Start from target node
                         collectDependencies(targetNodeId);
                         
-                        console.log(`🚀 AI Color Correction: executing ${Object.keys(selectedNodes).length} nodes instead of ${Object.keys(allNodes).length}`);
+                        console.log(`🚀 AI Color Corrector: executing ${Object.keys(selectedNodes).length} nodes instead of ${Object.keys(allNodes).length}`);
                         console.log(`🤖 AI Analysis will detect: faces, scene type, lighting conditions, dominant colors`);
                         return selectedNodes;
                         

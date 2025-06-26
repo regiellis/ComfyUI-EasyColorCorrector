@@ -30,7 +30,7 @@
 ### 🆕 **New Nodes (Beta)**
 - **Batch Color Corrector**: Process entire video sequences with the same AI-powered corrections
 - **RAW Image Processor**: Direct RAW file processing with professional color science
-- **Color Correction Viewer**: Real-time preview and analysis for video workflows
+- **Color Corrector Viewer**: Real-time preview and analysis for video workflows
 
 > The main Color Corrector is now professional-grade and rock solid. The new nodes are experimental playgrounds for advanced workflows.
 
@@ -221,7 +221,7 @@ pip install \
 
 ### Basic Workflow
 
-1. Add **"Easy Color Correction"** node to your workflow
+1. Add **"Easy Color Corrector"** node to your workflow
 2. Connect an image input
 3. Choose your mode:
    - **Auto**: Enable AI analysis and let it work its magic
@@ -281,12 +281,12 @@ enhancement_strength: 0.2         # Overall AI enhancement power (balanced defau
 extract_palette: bool = False     # Generate histogram and palette images
 ```
 
-### Real-time Preview
+### Lock Input Image
 
 ```python
-realtime_preview: bool = False    # Enable selective node execution
-# When enabled: Only processes this node + dependencies
-# Result: ~10x faster feedback during adjustments
+lock_input_image: bool = False    # Lock input to prevent upstream reprocessing
+# When enabled: Caches input image so upstream nodes don't reprocess
+# Result: Faster parameter adjustments without full workflow regeneration
 ```
 
 ### Performance Modes
