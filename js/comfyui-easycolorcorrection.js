@@ -27,9 +27,12 @@ const SETTINGS = {
 	}
 };
 
-// Helper function to show notifications based on settings
+// Helper function to show notifications based on settings using ComfyUI toast API
 function showNotification(message, type = "info") {
 	const notificationLevel = app.ui.settings.getSettingValue("EasyColorCorrection.notifications", SETTINGS.NOTIFICATIONS.FULL);
+	
+	// Debug: Log the current notification level
+	debugLog(`Notification level: ${notificationLevel}, message type: ${type}, message: ${message}`);
 	
 	switch (notificationLevel) {
 		case SETTINGS.NOTIFICATIONS.NONE:
@@ -38,13 +41,27 @@ function showNotification(message, type = "info") {
 		case SETTINGS.NOTIFICATIONS.MINIMAL:
 			// Only show errors and important messages
 			if (type === "error" || type === "important") {
-				app.ui.dialog.show(message);
+				app.extensionManager.toast.add({
+					severity: type === "error" ? "error" : "warn",
+					summary: "Easy Color Correction",
+					detail: message,
+					life: 5000
+				});
 			}
 			break;
 		case SETTINGS.NOTIFICATIONS.FULL:
 		default:
-			// Show all notifications
-			app.ui.dialog.show(message);
+			// Show all notifications using toast
+			let severity = "info";
+			if (type === "error") severity = "error";
+			else if (type === "important") severity = "warn";
+			
+			app.extensionManager.toast.add({
+				severity: severity,
+				summary: "Easy Color Correction",
+				detail: message,
+				life: 4000
+			});
 			break;
 	}
 	
@@ -56,15 +73,16 @@ function showNotification(message, type = "info") {
 function debugLog(message, level = "info") {
 	const debugMode = app.ui.settings.getSettingValue("EasyColorCorrection.debug_mode", false);
 	
-	if (debugMode || level === "error") {
-		const timestamp = new Date().toISOString().substr(11, 8);
-		console.log(`[${timestamp}] [EasyColorCorrection] ${message}`);
-	}
+	// Always log for now to debug settings issues
+	const timestamp = new Date().toISOString().substr(11, 8);
+	console.log(`[${timestamp}] [EasyColorCorrection] [${level}] ${message}`);
 }
 
 // Helper function to check batch size warnings
 function checkBatchSizeWarning(frameCount) {
 	const threshold = app.ui.settings.getSettingValue("EasyColorCorrection.batch_processing_size", 100);
+	
+	debugLog(`Checking batch size: ${frameCount} frames vs threshold: ${threshold}`);
 	
 	if (frameCount > threshold) {
 		showNotification(
@@ -161,7 +179,79 @@ app.registerExtension({
 
 	async beforeRegisterNodeDef(nodeType, nodeData, app) {
 		if (nodeData.name === "ColorCorrectionViewer") {
-			// Handle ColorCorrectionViewer node using proper ComfyUI patterns
+			// Use VideoHelperSuite pattern - simplified implementation
+			const onNodeCreated = nodeType.prototype.onNodeCreated;
+			nodeType.prototype.onNodeCreated = function () {
+				if (onNodeCreated) {
+					onNodeCreated.apply(this, arguments);
+				}
+
+				const node = this;
+				
+				// Simple info display
+				node.infoWidget = node.addWidget("text", "📊 Status", "Waiting for media...", function(v) {}, {
+					multiline: false,
+					readonly: true
+				});
+				
+				// File location button
+				node.addWidget("button", "📁 Show Files", null, function() {
+					if (node.videoData && node.videoData.subfolder) {
+						showNotification(`📁 Files: ComfyUI/output/${node.videoData.subfolder}/`, "info");
+					} else {
+						showNotification("No files generated yet", "info");
+					}
+				});
+
+				// Initialize data
+				node.videoData = { subfolder: null, totalFrames: 0, fps: 24.0 };
+				
+				// Handle execution results (VideoHelperSuite compatible)
+				node.onExecuted = function(message) {
+					debugLog("ColorViewer onExecuted: " + JSON.stringify(Object.keys(message || {})));
+					
+					if (!message) return;
+					
+					// Handle animated GIF (VideoHelperSuite format)
+					if (message.gifs && Array.isArray(message.gifs) && message.gifs.length > 0) {
+						const gif = message.gifs[0];
+						this.videoData.subfolder = gif.subfolder;
+						this.videoData.totalFrames = gif.frame_count || 0;
+						this.videoData.fps = gif.frame_rate || 24.0;
+						
+						this.infoWidget.value = `🎬 GIF: ${this.videoData.totalFrames} frames @ ${this.videoData.fps} FPS`;
+						showNotification(`🎬 Animated preview: ${gif.filename}`, "info");
+						debugLog(`GIF created: ${gif.filename} (${this.videoData.totalFrames} frames)`);
+					}
+					// Handle image sequence
+					else if (message.images && Array.isArray(message.images)) {
+						this.videoData.totalFrames = message.images.length;
+						
+						if (message.images.length > 0 && message.images[0].subfolder) {
+							this.videoData.subfolder = message.images[0].subfolder;
+						}
+						
+						this.infoWidget.value = `📸 Images: ${this.videoData.totalFrames} frames`;
+						
+						if (this.videoData.totalFrames > 100) {
+							showNotification(`⚠️ Large sequence: ${this.videoData.totalFrames} frames`, "important");
+						} else {
+							showNotification(`📸 Sequence: ${this.videoData.totalFrames} frames`, "info");
+						}
+						
+						debugLog(`Image sequence: ${this.videoData.totalFrames} frames`);
+					}
+					else {
+						this.infoWidget.value = "No media found";
+						debugLog("No compatible media in message", "error");
+					}
+					
+					this.setDirtyCanvas(true, true);
+				};
+			};
+		}
+		else if (nodeData.name === "EasyColorCorrection") {
+			// Handle EasyColorCorrection node
 			const onNodeCreated = nodeType.prototype.onNodeCreated;
 			nodeType.prototype.onNodeCreated = function () {
 				if (onNodeCreated) {
@@ -179,41 +269,100 @@ app.registerExtension({
 				// Add playback controls using standard widgets
 				const playButton = node.addWidget("button", "▶ Play/Pause", null, function() {
 					const videoData = node.videoData;
-					if (videoData && videoData.frames) {
+					if (videoData && videoData.totalFrames > 0) {
 						videoData.isPlaying = !videoData.isPlaying;
 						playButton.name = videoData.isPlaying ? "⏸ Pause" : "▶ Play";
 						
 						if (videoData.isPlaying) {
-							startPlayback(node);
+							node.startPlayback();
 						} else {
-							stopPlayback(node);
+							node.stopPlayback();
 						}
+					} else {
+						showNotification("No frames to play", "error");
 					}
 				});
 				
 				const frameWidget = node.addWidget("number", "Current Frame", 0, function(v) {
 					const videoData = node.videoData;
-					if (videoData && videoData.frames) {
+					if (videoData && videoData.totalFrames > 0) {
 						videoData.currentFrame = Math.max(0, Math.min(v, videoData.totalFrames - 1));
-						updateFrameDisplay(node);
+						node.updateFrameDisplay();
 					}
 				}, {
 					min: 0,
-					max: 100,
+					max: 0,
 					step: 1
 				});
 				
+				// Add cleanup button for disk space management
+				const cleanupButton = node.addWidget("button", "🗑️ Delete Images", null, function() {
+					if (node.videoData.subfolder) {
+						// Simple cleanup - for now just show message (complex backend integration needed)
+						showNotification(`📁 Images saved in: ${node.videoData.subfolder}. Delete manually from ComfyUI/output/`, "info");
+					} else {
+						showNotification("No images to delete", "info");
+					}
+				});
+
 				// Store references
 				node.infoWidget = infoWidget;
 				node.playButton = playButton;
 				node.frameWidget = frameWidget;
+				node.cleanupButton = cleanupButton;
 				node.videoData = {
 					isPlaying: false,
 					currentFrame: 0,
 					totalFrames: 0,
 					frames: null,
 					fps: 24.0,
-					playbackInterval: null
+					playbackInterval: null,
+					subfolder: null
+				};
+				
+				// Add playback methods to node
+				node.startPlayback = function() {
+					if (this.videoData.playbackInterval) {
+						clearInterval(this.videoData.playbackInterval);
+					}
+					
+					const frameDelay = 1000 / this.videoData.fps;
+					this.videoData.playbackInterval = setInterval(() => {
+						if (this.videoData.isPlaying && this.videoData.totalFrames > 0) {
+							this.videoData.currentFrame++;
+							
+							// Handle looping based on loop setting
+							if (this.videoData.currentFrame >= this.videoData.totalFrames) {
+								const loopWidget = this.widgets.find(w => w.name === "loop");
+								const shouldLoop = loopWidget ? loopWidget.value : true;
+								
+								if (shouldLoop) {
+									this.videoData.currentFrame = 0; // Loop back to start
+								} else {
+									// Stop at end if not looping
+									this.videoData.currentFrame = this.videoData.totalFrames - 1;
+									this.videoData.isPlaying = false;
+									this.playButton.name = "▶ Play/Pause";
+									this.stopPlayback();
+									return;
+								}
+							}
+							
+							this.frameWidget.value = this.videoData.currentFrame;
+							this.updateFrameDisplay();
+						}
+					}, frameDelay);
+				};
+				
+				node.stopPlayback = function() {
+					if (this.videoData.playbackInterval) {
+						clearInterval(this.videoData.playbackInterval);
+						this.videoData.playbackInterval = null;
+					}
+				};
+				
+				node.updateFrameDisplay = function() {
+					this.setDirtyCanvas(true, true);
 				};
 				
 				// Frame display area (custom drawing)
@@ -295,47 +444,62 @@ app.registerExtension({
 					// For now, just trigger a redraw
 					node.setDirtyCanvas(true, true);
 				}
-			};
-			
-			// Override onExecuted to receive data properly
-			const onExecuted = nodeType.prototype.onExecuted;
-			nodeType.prototype.onExecuted = function(message) {
-				if (onExecuted) {
-					onExecuted.call(this, message);
-				}
 				
-				debugLog("ColorCorrectionViewer onExecuted: " + JSON.stringify(message));
-				
-				// Update video data from the execution message
-				if (message && typeof message === 'object') {
-					const videoData = this.videoData;
+				// Set onExecuted callback directly on node instance (proper ComfyUI pattern)
+				node.onExecuted = function(message) {
+					debugLog("ColorCorrectionViewer onExecuted: " + JSON.stringify(Object.keys(message || {})));
 					
-					// Look for frame count in various possible locations
-					const frameCount = message.frame_count || message.frames || message.total_frames;
-					
-					if (frameCount && Array.isArray(frameCount) && frameCount.length > 0) {
-						videoData.totalFrames = frameCount[0];
-						videoData.currentFrame = 0;
-						videoData.fps = this.widgets.find(w => w.name === "fps")?.value || 24.0;
-						
-						// Update UI
-						this.infoWidget.value = `${videoData.totalFrames} frames @ ${videoData.fps} FPS`;
-						this.frameWidget.options.max = videoData.totalFrames - 1;
-						this.frameWidget.value = 0;
-						
-						// Check for batch size warnings
-						checkBatchSizeWarning(videoData.totalFrames);
-						
-						// Show success notification
-						showNotification(`📹 Video loaded: ${videoData.totalFrames} frames`, "info");
-						
-						debugLog(`Video data updated: ${videoData.totalFrames} frames @ ${videoData.fps} FPS`);
-						this.setDirtyCanvas(true, true);
-					} else {
-						debugLog("No frame count found in message: " + Object.keys(message).join(", "), "error");
-						showNotification("❌ No video data received", "error");
+					if (!message || !message.images || !Array.isArray(message.images)) {
+						debugLog("No images found in execution message", "error");
+						this.infoWidget.value = "No images received";
+						return;
 					}
-				}
+					
+					// Handle images properly - ComfyUI sends images in message.images
+					const images = message.images;
+					this.videoData.frames = images;
+					this.videoData.totalFrames = images.length;
+					this.videoData.currentFrame = 0;
+					
+					// Extract subfolder for cleanup functionality
+					if (images.length > 0 && images[0].subfolder) {
+						this.videoData.subfolder = images[0].subfolder;
+						debugLog(`Stored subfolder for cleanup: ${this.videoData.subfolder}`);
+					}
+					
+					// Also check UI response for subfolder
+					if (message.ui && message.ui.subfolder && Array.isArray(message.ui.subfolder)) {
+						this.videoData.subfolder = message.ui.subfolder[0];
+						debugLog(`Stored subfolder from UI: ${this.videoData.subfolder}`);
+					}
+					
+					// Update UI
+					this.infoWidget.value = `${this.videoData.totalFrames} frames @ ${this.videoData.fps} FPS`;
+					this.frameWidget.options.max = Math.max(0, this.videoData.totalFrames - 1);
+					this.frameWidget.value = 0;
+					
+					// Check for large frame counts that might cause memory issues
+					if (this.videoData.totalFrames > 100) {
+						showNotification(`⚠️ Large video: ${this.videoData.totalFrames} frames. May cause browser slowdown.`, "important");
+					} else {
+						showNotification(`📹 Video loaded: ${this.videoData.totalFrames} frames`, "info");
+					}
+					
+					// Auto-play if enabled
+					const autoPlayWidget = this.widgets.find(w => w.name === "auto_play");
+					if (autoPlayWidget && autoPlayWidget.value && this.videoData.totalFrames > 1) {
+						// Small delay to ensure UI is ready
+						setTimeout(() => {
+							this.videoData.isPlaying = true;
+							this.playButton.name = "⏸ Pause";
+							this.startPlayback();
+							debugLog("Auto-play started");
+						}, 500);
+					}
+					
+					debugLog(`Video loaded: ${this.videoData.totalFrames} frames`);
+					this.setDirtyCanvas(true, true);
+				};
 			};
 			
 			// Also listen for API execution events as backup
@@ -1186,15 +1350,25 @@ app.registerExtension({
                         if (originalFramesCallback) originalFramesCallback.apply(this, arguments);
                         updateBatchEstimation();
                         
-                        // Console guidance for batch sizing
+                        // Toast notification guidance for batch sizing
                         const frames = this.value;
-                        if (frames <= 8) {
-                            console.log(`📊 Batch Size: ${frames} frames - High quality, slower processing`);
+                        let message, type;
+                        
+                        if (frames <= 4) {
+                            message = `🎯 Batch Size: ${frames} frames - BEST QUALITY but SLOW (high memory per frame, detailed processing)`;
+                            type = "info";
+                        } else if (frames <= 16) {
+                            message = `⚖️ Batch Size: ${frames} frames - BALANCED Speed & Quality (recommended for most workflows)`;
+                            type = "info";
                         } else if (frames <= 32) {
-                            console.log(`⚖️ Batch Size: ${frames} frames - Balanced quality and speed`);
+                            message = `⚡ Batch Size: ${frames} frames - FAST processing but RESOURCE HEAVY (requires more VRAM)`;
+                            type = "important";
                         } else {
-                            console.log(`⚡ Batch Size: ${frames} frames - Fast processing, high memory usage`);
+                            message = `🔥 Batch Size: ${frames} frames - MAXIMUM SPEED but VERY RESOURCE HEAVY (8GB+ VRAM recommended)`;
+                            type = "important";
                         }
+                        
+                        showNotification(message, type);
                     };
                 }
 
