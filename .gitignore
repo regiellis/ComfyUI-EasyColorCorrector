@@ -3,6 +3,13 @@ __pycache__/
 .vscode/
 .tmp
 .cache
+src/.cache/
+models/
+*.bin
+*.safetensors
+*.ckpt
+*.pth
+*.pt
 config.ini
 snapshots/**
 startup-scripts/**

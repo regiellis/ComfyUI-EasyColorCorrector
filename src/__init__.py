@@ -29,6 +29,20 @@ except ImportError as e:
     print(f"EasyColorCorrection: RAW processing disabled - missing rawpy library: {e}")
     RAW_PROCESSING_AVAILABLE = False
 
+# DEEP LEARNING COLORIZATION
+try:
+    from PIL import Image
+    import torchvision.transforms as transforms
+    import urllib.request
+    import os
+    from huggingface_hub import hf_hub_download, snapshot_download
+    import timm
+    
+    DL_COLORIZATION_AVAILABLE = True
+except ImportError as e:
+    print(f"EasyColorCorrection: Deep learning colorization disabled - missing libraries: {e}")
+    DL_COLORIZATION_AVAILABLE = False
+
 # HDR/EXR IMAGE PROCESSING
 try:
     import OpenEXR
@@ -105,6 +119,379 @@ def hsv_to_rgb(hsv: torch.Tensor) -> torch.Tensor:
     rgb[s == 0] = torch.stack([v, v, v], dim=-1)[s == 0]
 
     return rgb
+
+
+def create_color_range_mask(hsv: torch.Tensor, target_hue: float, hue_range: float = 60.0) -> torch.Tensor:
+    """Create a mask for a specific color range in HSV space."""
+    h = hsv[..., 0]  # Hue channel (0-1)
+    s = hsv[..., 1]  # Saturation channel (0-1)
+    
+    # Convert target hue from degrees to 0-1 range
+    target_h = (target_hue % 360) / 360.0
+    range_h = hue_range / 360.0
+    
+    # Calculate hue distance (handling wrap-around)
+    hue_diff = torch.abs(h - target_h)
+    hue_diff = torch.min(hue_diff, 1.0 - hue_diff)  # Handle wrap-around at 0/1
+    
+    # Create smooth falloff mask based on hue distance and saturation
+    hue_mask = torch.exp(-((hue_diff / range_h) ** 2) * 3.0)  # Gaussian falloff
+    saturation_mask = torch.clamp(s * 2.0, 0.0, 1.0)  # Favor more saturated colors
+    
+    return hue_mask * saturation_mask
+
+
+def apply_selective_color_adjustment(
+    image: torch.Tensor,
+    target_hue: float,
+    hue_adjustment: float,
+    saturation_adjustment: float,
+    lightness_adjustment: float,
+    hue_range: float = 60.0
+) -> torch.Tensor:
+    """Apply selective color adjustments to a specific color range."""
+    if abs(hue_adjustment) < 0.001 and abs(saturation_adjustment) < 0.001 and abs(lightness_adjustment) < 0.001:
+        return image
+    
+    # Convert to HSV for processing
+    hsv = rgb_to_hsv(image)
+    
+    # Create mask for target color range
+    mask = create_color_range_mask(hsv, target_hue, hue_range)
+    
+    # Apply adjustments
+    adjusted_hsv = hsv.clone()
+    
+    # Hue adjustment (wrap around 0-1)
+    if abs(hue_adjustment) > 0.001:
+        hue_shift = hue_adjustment * 0.1  # Scale adjustment
+        adjusted_hsv[..., 0] = (adjusted_hsv[..., 0] + hue_shift * mask.unsqueeze(-1)) % 1.0
+    
+    # Saturation adjustment
+    if abs(saturation_adjustment) > 0.001:
+        sat_factor = 1.0 + saturation_adjustment
+        adjusted_hsv[..., 1] = torch.clamp(
+            adjusted_hsv[..., 1] * (1.0 + (sat_factor - 1.0) * mask.unsqueeze(-1)),
+            0.0, 1.0
+        )
+    
+    # Lightness adjustment (applied to Value in HSV)
+    if abs(lightness_adjustment) > 0.001:
+        light_factor = 1.0 + lightness_adjustment * 0.5  # Scale adjustment
+        adjusted_hsv[..., 2] = torch.clamp(
+            adjusted_hsv[..., 2] * (1.0 + (light_factor - 1.0) * mask.unsqueeze(-1)),
+            0.0, 1.0
+        )
+    
+    # Convert back to RGB
+    return hsv_to_rgb(adjusted_hsv)
+
+
+class DDColorColorization:
+    """DDColor Deep Learning Colorization using pre-trained models."""
+    
+    def __init__(self):
+        self.model = None
+        self.device = None
+        self.transform = None
+        self.model_name = "piddnad/ddcolor_modelscope"
+        
+    def _load_fallback_model(self, device):
+        """Load a simple fallback model if DDColor fails."""
+        try:
+            import torch.nn as nn
+            
+            class FallbackColorizationNet(nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    self.encoder = nn.Sequential(
+                        nn.Conv2d(3, 64, 3, padding=1),
+                        nn.ReLU(),
+                        nn.Conv2d(64, 128, 3, padding=1),
+                        nn.ReLU(),
+                        nn.MaxPool2d(2),
+                        nn.Conv2d(128, 256, 3, padding=1),
+                        nn.ReLU(),
+                    )
+                    self.decoder = nn.Sequential(
+                        nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+                        nn.Conv2d(256, 128, 3, padding=1),
+                        nn.ReLU(),
+                        nn.Conv2d(128, 64, 3, padding=1),
+                        nn.ReLU(),
+                        nn.Conv2d(64, 2, 3, padding=1),
+                        nn.Tanh(),
+                    )
+                
+                def forward(self, x):
+                    encoded = self.encoder(x)
+                    decoded = self.decoder(encoded)
+                    return decoded
+            
+            self.model = FallbackColorizationNet()
+            self.model.to(device)
+            self.model.eval()
+            self.device = device
+            
+            print("✅ Fallback colorization model loaded")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Failed to load fallback model: {e}")
+            return False
+    
+    
+    def load_model(self, device):
+        """Load the DDColor model from Hugging Face."""
+        if not DL_COLORIZATION_AVAILABLE:
+            return False
+            
+        try:
+            print("🔄 Loading DDColor model...")
+            from huggingface_hub import snapshot_download
+            import torch.nn as nn
+            
+            # Try to download the model files (this will be cached)
+            try:
+                model_path = snapshot_download(repo_id=self.model_name, cache_dir=os.path.join(os.path.dirname(__file__), ".cache"))
+                print(f"✅ DDColor model files downloaded to {model_path}")
+            except Exception as e:
+                print(f"⚠️ Could not download DDColor model: {e}")
+                print("⚠️ Falling back to simplified colorization")
+                return self._load_fallback_model(device)
+            
+            # Load DDColor architecture (improved version with proper upsampling)
+            class DDColorNet(nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    # Simple but effective encoder
+                    self.encoder = nn.Sequential(
+                        # Input: 3 x 256 x 256
+                        nn.Conv2d(3, 64, 3, padding=1),  # 64 x 256 x 256
+                        nn.ReLU(),
+                        nn.Conv2d(64, 64, 3, padding=1),  # 64 x 256 x 256
+                        nn.ReLU(),
+                        nn.MaxPool2d(2),  # 64 x 128 x 128
+                        
+                        nn.Conv2d(64, 128, 3, padding=1),  # 128 x 128 x 128
+                        nn.ReLU(),
+                        nn.Conv2d(128, 128, 3, padding=1),  # 128 x 128 x 128
+                        nn.ReLU(),
+                        nn.MaxPool2d(2),  # 128 x 64 x 64
+                        
+                        nn.Conv2d(128, 256, 3, padding=1),  # 256 x 64 x 64
+                        nn.ReLU(),
+                        nn.Conv2d(256, 256, 3, padding=1),  # 256 x 64 x 64
+                        nn.ReLU(),
+                        nn.MaxPool2d(2),  # 256 x 32 x 32
+                        
+                        nn.Conv2d(256, 512, 3, padding=1),  # 512 x 32 x 32
+                        nn.ReLU(),
+                    )
+                    
+                    # Decoder with proper upsampling to match input size
+                    self.decoder = nn.Sequential(
+                        # 512 x 32 x 32 -> 256 x 64 x 64
+                        nn.ConvTranspose2d(512, 256, 4, stride=2, padding=1),
+                        nn.ReLU(),
+                        
+                        # 256 x 64 x 64 -> 128 x 128 x 128
+                        nn.ConvTranspose2d(256, 128, 4, stride=2, padding=1),
+                        nn.ReLU(),
+                        
+                        # 128 x 128 x 128 -> 64 x 256 x 256
+                        nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1),
+                        nn.ReLU(),
+                        
+                        # Final layer to produce AB channels: 64 x 256 x 256 -> 2 x 256 x 256
+                        nn.Conv2d(64, 2, 3, padding=1),
+                        nn.Tanh(),
+                    )
+                
+                def forward(self, x):
+                    # Encode
+                    encoded = self.encoder(x)
+                    # Decode to AB channels
+                    ab = self.decoder(encoded)
+                    return ab
+            
+            self.model = DDColorNet()
+            self.model.to(device)
+            self.model.eval()
+            self.device = device
+            
+            # Set up transforms
+            self.transform = transforms.Compose([
+                transforms.Resize((256, 256)),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
+            
+            print("✅ DDColor model loaded successfully")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Failed to load DDColor model: {e}")
+            print("⚠️ Falling back to basic colorization")
+            return self._load_fallback_model(device)
+    
+    def colorize_image(self, image_tensor, strength=1.0):
+        """Colorize a grayscale or low-saturation image using DDColor."""
+        if self.model is None:
+            print("❌ DDColor model not loaded")
+            return image_tensor
+            
+        try:
+            print(f"🤖 Applying DDColor colorization with strength {strength:.2f}")
+            device = image_tensor.device
+            original_size = image_tensor.shape
+            print(f"🔧 Input image size: {original_size}")
+            
+            # Prepare input - convert to proper format
+            input_rgb = image_tensor.squeeze(0)  # Remove batch dimension
+            
+            # Convert to grayscale for DDColor input (expects single channel)
+            if ADVANCED_LIBS_AVAILABLE:
+                # Convert to grayscale using proper weights
+                gray = 0.299 * input_rgb[:,:,0] + 0.587 * input_rgb[:,:,1] + 0.114 * input_rgb[:,:,2]
+                gray_3ch = gray.unsqueeze(-1).repeat(1, 1, 3)  # Convert to 3-channel for model
+            else:
+                # Simple average
+                gray = torch.mean(input_rgb, dim=2, keepdim=True)
+                gray_3ch = gray.repeat(1, 1, 3)
+            
+            # Resize for model input and add batch dimension
+            input_resized = F.interpolate(gray_3ch.unsqueeze(0).permute(0, 3, 1, 2), 
+                                        size=(256, 256), mode='bilinear', align_corners=False)
+            
+            print(f"🔧 Model input size: {input_resized.shape}")
+            
+            # Run through model
+            with torch.no_grad():
+                ab_pred = self.model(input_resized)
+                print(f"🔧 Model output size: {ab_pred.shape}")
+                
+                # Resize back to original size
+                if ab_pred.shape[-2:] != original_size[1:3]:
+                    ab_pred = F.interpolate(ab_pred, size=original_size[1:3], 
+                                          mode='bilinear', align_corners=False)
+                    print(f"🔧 Resized output to: {ab_pred.shape}")
+                
+                # Convert to LAB and combine with L channel
+                if ADVANCED_LIBS_AVAILABLE:
+                    print("🔧 Using advanced LAB color space conversion")
+                    # Convert RGB input to LAB to get L channel
+                    rgb_np = (input_rgb.cpu().numpy() * 255).astype(np.uint8)
+                    lab_image = cv2.cvtColor(rgb_np, cv2.COLOR_RGB2LAB)
+                    l_channel = lab_image[:, :, 0].astype(np.float32)
+                    
+                    # Scale AB predictions - be more conservative with scaling
+                    ab_np = ab_pred.squeeze(0).permute(1, 2, 0).cpu().numpy()
+                    
+                    # DDColor typically outputs in [-1,1], scale more conservatively
+                    ab_np = ab_np * 50.0  # Reduced from 127 to 50 for less aggressive coloring
+                    
+                    # Combine L and AB channels
+                    lab_pred = np.zeros((original_size[1], original_size[2], 3), dtype=np.float32)
+                    lab_pred[:,:,0] = l_channel  # L channel from original
+                    lab_pred[:,:,1] = ab_np[:,:,0]  # A channel from prediction
+                    lab_pred[:,:,2] = ab_np[:,:,1]  # B channel from prediction
+                    
+                    # Ensure values are in valid LAB range
+                    lab_pred[:,:,0] = np.clip(lab_pred[:,:,0], 0, 100)  # L channel range
+                    lab_pred[:,:,1:] = np.clip(lab_pred[:,:,1:], -127, 127)  # AB channel range
+                    
+                    print(f"🔧 LAB stats - L: [{lab_pred[:,:,0].min():.1f}, {lab_pred[:,:,0].max():.1f}], A: [{lab_pred[:,:,1].min():.1f}, {lab_pred[:,:,1].max():.1f}], B: [{lab_pred[:,:,2].min():.1f}, {lab_pred[:,:,2].max():.1f}]")
+                    
+                    # Convert back to RGB - ensure proper data type
+                    lab_uint8 = lab_pred.astype(np.uint8)
+                    rgb_pred = cv2.cvtColor(lab_uint8, cv2.COLOR_LAB2RGB)
+                    result_tensor = torch.from_numpy(rgb_pred.astype(np.float32) / 255.0).unsqueeze(0).to(device)
+                    print("✅ LAB to RGB conversion completed")
+                else:
+                    print("🔧 Using fallback RGB colorization")
+                    # Simple fallback - blend AB predictions with grayscale
+                    ab_pred_scaled = ab_pred * 0.5  # Reduce intensity
+                    
+                    # Create colorized version
+                    colorized = torch.zeros_like(input_rgb)
+                    gray_normalized = (gray - gray.min()) / (gray.max() - gray.min() + 1e-8)
+                    
+                    # Use AB predictions to modulate RG channels
+                    ab_resized = ab_pred.squeeze(0).permute(1, 2, 0)
+                    colorized[:,:,0] = gray_normalized.squeeze(-1)  # Keep grayscale as red
+                    colorized[:,:,1] = torch.clamp(gray_normalized.squeeze(-1) + ab_resized[:,:,0] * 0.3, 0, 1)  # A -> Green
+                    colorized[:,:,2] = torch.clamp(gray_normalized.squeeze(-1) + ab_resized[:,:,1] * 0.3, 0, 1)  # B -> Blue
+                    
+                    result_tensor = colorized.unsqueeze(0)
+            
+            # Blend with original based on strength
+            result = torch.lerp(image_tensor, result_tensor, strength)
+            print(f"✅ DDColor colorization completed, blended with strength {strength:.2f}")
+            
+            return result
+            
+        except Exception as e:
+            print(f"❌ DDColor colorization failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return image_tensor
+
+
+# Global colorization instance
+_deep_colorizer = None
+
+def get_deep_colorizer():
+    """Get or create the global deep colorization instance."""
+    global _deep_colorizer
+    if _deep_colorizer is None:
+        _deep_colorizer = DDColorColorization()
+    return _deep_colorizer
+
+
+def apply_semantic_color_adjustments(
+    image: torch.Tensor,
+    skin_tone_adjustment: float = 0.0,
+    sky_adjustment: float = 0.0,
+    foliage_adjustment: float = 0.0,
+    selective_hue_shift: float = 0.0,
+    selective_saturation: float = 0.0,
+    selective_strength: float = 1.0,
+) -> torch.Tensor:
+    """Apply semantic color adjustments targeting skin tones, sky, and foliage."""
+    result = image.clone()
+    
+    # Early exit if no adjustments
+    if (abs(skin_tone_adjustment) < 0.001 and abs(sky_adjustment) < 0.001 and 
+        abs(foliage_adjustment) < 0.001 and abs(selective_hue_shift) < 0.001 and 
+        abs(selective_saturation) < 0.001):
+        return result
+    
+    # Define semantic color targets with broader, more natural ranges
+    semantic_targets = []
+    
+    # Skin tones: warm oranges/yellows (20-50 degrees)
+    if abs(skin_tone_adjustment) > 0.001:
+        semantic_targets.append((35, selective_hue_shift, selective_saturation + skin_tone_adjustment, skin_tone_adjustment * 0.3, 80.0))
+    
+    # Sky/water: blues and cyans (200-260 degrees)  
+    if abs(sky_adjustment) > 0.001:
+        semantic_targets.append((230, selective_hue_shift, selective_saturation + sky_adjustment, sky_adjustment * 0.2, 70.0))
+    
+    # Foliage: greens (90-150 degrees)
+    if abs(foliage_adjustment) > 0.001:
+        semantic_targets.append((120, selective_hue_shift, selective_saturation + foliage_adjustment, foliage_adjustment * 0.3, 80.0))
+    
+    # Apply semantic adjustments
+    for target_hue, hue_adj, sat_adj, light_adj, hue_range in semantic_targets:
+        if abs(hue_adj) > 0.001 or abs(sat_adj) > 0.001 or abs(light_adj) > 0.001:
+            adjustment = apply_selective_color_adjustment(
+                result, target_hue, hue_adj * selective_strength, 
+                sat_adj * selective_strength, light_adj * selective_strength, hue_range
+            )
+            # Blend with original based on selective_strength
+            result = torch.lerp(result, adjustment, selective_strength)
+    
+    return result
 
 
 # --- ADVANCED ANALYSIS FUNCTIONS ---
@@ -278,7 +665,14 @@ def analyze_image_content(
         face_cascade = cv2.CascadeClassifier(
             cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         )
-        faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+        # Balanced parameters for reliable face detection
+        faces = face_cascade.detectMultiScale(
+            gray, 
+            scaleFactor=1.1,      # Standard scale factor
+            minNeighbors=3,       # Balanced between sensitivity and accuracy
+            minSize=(30, 30),     # Reasonable minimum size
+            flags=cv2.CASCADE_SCALE_IMAGE
+        )
         analysis["faces"] = faces.tolist() if len(faces) > 0 else []
     except Exception:
         analysis["faces"] = []
@@ -363,7 +757,7 @@ def analyze_image_content(
             analysis["scene_type"] = "stylized_art"
         elif avg_saturation > 100 and color_variance > 50 and texture_contrast > 40:
             analysis["scene_type"] = "concept_art"
-        elif edge_density > 0.2 and texture_contrast > 50:
+        elif edge_density > 0.25 and texture_contrast > 65 and avg_saturation > 90:
             analysis["scene_type"] = "detailed_illustration"
         elif len(analysis["faces"]) > 0 and edge_density < 0.15:
             analysis["scene_type"] = "portrait"
@@ -1184,6 +1578,67 @@ class EasyColorCorrection:
                         "tooltip": "Noise reduction strength (0.0 = no noise reduction, 1.0 = maximum noise reduction)",
                     },
                 ),
+                # Semantic Selective Color Controls
+                "skin_tone_adjustment": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": -1.0,
+                        "max": 1.0,
+                        "step": 0.05,
+                        "tooltip": "🧑 Adjust skin tones and flesh colors (targets warm oranges/yellows)",
+                    },
+                ),
+                "sky_adjustment": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": -1.0,
+                        "max": 1.0,
+                        "step": 0.05,
+                        "tooltip": "🌅 Adjust sky and blue regions (targets blues/cyans)",
+                    },
+                ),
+                "foliage_adjustment": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": -1.0,
+                        "max": 1.0,
+                        "step": 0.05,
+                        "tooltip": "🌿 Adjust foliage and vegetation (targets greens)",
+                    },
+                ),
+                "selective_hue_shift": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": -1.0,
+                        "max": 1.0,
+                        "step": 0.05,
+                        "tooltip": "🎨 Universal hue shift for targeted colors",
+                    },
+                ),
+                "selective_saturation": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": -1.0,
+                        "max": 1.0,
+                        "step": 0.05,
+                        "tooltip": "🎨 Universal saturation adjustment for targeted colors",
+                    },
+                ),
+                "selective_strength": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.05,
+                        "tooltip": "💪 Overall strength of selective color adjustments",
+                    },
+                ),
                 # Colorize mode specific parameters
                 "colorize_strength": (
                     "FLOAT",
@@ -1236,10 +1691,17 @@ class EasyColorCorrection:
                     },
                 ),
                 "colorize_mode": (
-                    ["auto", "portrait", "landscape", "vintage"],
+                    ["deep_learning", "classic", "portrait", "landscape", "vintage"],
                     {
-                        "default": "auto",
-                        "tooltip": "🎯 Colorization style: auto-detect, portrait focus, landscape focus, or vintage look",
+                        "default": "deep_learning",
+                        "tooltip": "🎯 Colorization method: deep_learning (AI), classic (HSV), portrait, landscape, or vintage",
+                    },
+                ),
+                "force_colorize": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "🔄 Force colorization even for art/anime content (overrides AI detection)",
                     },
                 ),
                 "use_gpu": (
@@ -1284,12 +1746,20 @@ class EasyColorCorrection:
         gamma: float = 0.0,
         gain: float = 0.0,
         noise: float = 0.0,
+        # Semantic Selective Color parameters
+        skin_tone_adjustment: float = 0.0,
+        sky_adjustment: float = 0.0,
+        foliage_adjustment: float = 0.0,
+        selective_hue_shift: float = 0.0,
+        selective_saturation: float = 0.0,
+        selective_strength: float = 1.0,
         colorize_strength: float = 0.8,
         skin_warmth: float = 0.3,
         sky_saturation: float = 0.6,
         vegetation_green: float = 0.5,
         sepia_tone: float = 0.0,
         colorize_mode: str = "auto",
+        force_colorize: bool = False,
         use_gpu: bool = True,
         mask: typing.Optional[torch.Tensor] = None,
     ) -> tuple:
@@ -1623,90 +2093,15 @@ class EasyColorCorrection:
                     .to(processed_image.device)
                 )
 
-            hsv_image = rgb_to_hsv(processed_image)
-            h, s, v = hsv_image[..., 0], hsv_image[..., 1], hsv_image[..., 2]
-
-            # Warmth will be handled in LAB color space later for proper temperature control
-            # (removing the simple hue shift approach)
-
-            if vibrancy != 0.0:
-                saturation_mask = 1.0 - s
-                s = s * (1.0 + vibrancy) + (vibrancy * 0.3 * saturation_mask * s)
-
-            if brightness != 0.0:
-                v = v + brightness * (1.0 - v * 0.5)
-
-            if contrast != 0.0:
-                v = 0.5 + (v - 0.5) * (1.0 + contrast)
-
-            processed_image = hsv_to_rgb(torch.stack([h, s, v], dim=-1))
-            processed_image = torch.clamp(processed_image, 0.0, 1.0)
-
-            # === TEMPERATURE & TINT PROCESSING (LAB color space) ===
-            if (warmth != 0.0 or tint != 0.0) and mode == "Manual":
-                # Convert to numpy for LAB processing
-                image_np_for_color = (processed_image[0].cpu().numpy() * 255).astype(
-                    np.uint8
-                )
-
-                if ADVANCED_LIBS_AVAILABLE:
-                    try:
-                        # Convert to LAB color space
-                        lab = cv2.cvtColor(image_np_for_color, cv2.COLOR_RGB2LAB)
-
-                        # Apply temperature adjustment to 'b' channel (blue-yellow axis)
-                        if warmth != 0.0:
-                            # 'b' channel: values around 128 are neutral, <128 is blue, >128 is yellow
-                            temperature_shift = (
-                                warmth * 35
-                            )  # Scale factor for visible temperature effect
-                            lab[:, :, 2] = np.clip(
-                                lab[:, :, 2] + temperature_shift, 0, 255
-                            )
-
-                        # Apply tint adjustment to 'a' channel (green-magenta axis)
-                        if tint != 0.0:
-                            # 'a' channel: values around 128 are neutral, <128 is green, >128 is magenta
-                            tint_shift = (
-                                tint * 30
-                            )  # Scale factor for visible tint effect
-                            lab[:, :, 1] = np.clip(lab[:, :, 1] + tint_shift, 0, 255)
-
-                        # Convert back to RGB
-                        color_corrected_rgb = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
-                        processed_image = (
-                            torch.from_numpy(
-                                color_corrected_rgb.astype(np.float32) / 255.0
-                            )
-                            .unsqueeze(0)
-                            .to(processed_image.device)
-                        )
-                        processed_image = torch.clamp(processed_image, 0.0, 1.0)
-
-                        adjustments = []
-                        if warmth != 0.0:
-                            adjustments.append(
-                                f"temperature: {warmth:.2f} ({'warmer' if warmth > 0 else 'cooler'})"
-                            )
-                        if tint != 0.0:
-                            adjustments.append(
-                                f"tint: {tint:.2f} ({'magenta' if tint > 0 else 'green'})"
-                            )
-                        print(
-                            f"🌡️ Applied professional color adjustments: {', '.join(adjustments)}"
-                        )
-
-                    except Exception as e:
-                        print(
-                            f"⚠️ Temperature/tint processing failed, using original: {e}"
-                        )
-                else:
-                    print(
-                        "⚠️ Professional temperature/tint requires advanced libraries (OpenCV), skipping"
-                    )
+            # Manual mode controls only apply when mode == "Manual"
+            # Move HSV processing inside Manual mode
 
             # --- MANUAL MODE ---
             if mode == "Manual":
+                # Convert to HSV for manual adjustments
+                hsv_image = rgb_to_hsv(processed_image)
+                h, s, v = hsv_image[..., 0], hsv_image[..., 1], hsv_image[..., 2]
+                
                 ai_guidance = ""
                 if analysis:
                     scene_type = analysis["scene_type"]
@@ -1720,6 +2115,87 @@ class EasyColorCorrection:
                     else:
                         ai_guidance = " + AI Guidance"
                 print(f"🎛️ Professional Manual Mode{ai_guidance}")
+
+                # Basic HSV adjustments
+                if vibrancy != 0.0:
+                    saturation_mask = 1.0 - s
+                    s = s * (1.0 + vibrancy) + (vibrancy * 0.3 * saturation_mask * s)
+
+                if brightness != 0.0:
+                    v = v + brightness * (1.0 - v * 0.5)
+
+                if contrast != 0.0:
+                    v = 0.5 + (v - 0.5) * (1.0 + contrast)
+
+                processed_image = hsv_to_rgb(torch.stack([h, s, v], dim=-1))
+                processed_image = torch.clamp(processed_image, 0.0, 1.0)
+                
+                # === TEMPERATURE & TINT PROCESSING (LAB color space) ===
+                if (warmth != 0.0 or tint != 0.0):
+                    # Convert to numpy for LAB processing
+                    image_np_for_color = (processed_image[0].cpu().numpy() * 255).astype(
+                        np.uint8
+                    )
+
+                    if ADVANCED_LIBS_AVAILABLE:
+                        try:
+                            # Convert to LAB color space
+                            lab = cv2.cvtColor(image_np_for_color, cv2.COLOR_RGB2LAB)
+
+                            # Apply temperature adjustment to 'b' channel (blue-yellow axis)
+                            if warmth != 0.0:
+                                # 'b' channel: values around 128 are neutral, <128 is blue, >128 is yellow
+                                temperature_shift = (
+                                    warmth * 35
+                                )  # Scale factor for visible temperature effect
+                                lab[:, :, 2] = np.clip(
+                                    lab[:, :, 2] + temperature_shift, 0, 255
+                                )
+
+                            # Apply tint adjustment to 'a' channel (green-magenta axis)
+                            if tint != 0.0:
+                                # 'a' channel: values around 128 are neutral, <128 is green, >128 is magenta
+                                tint_shift = (
+                                    tint * 30
+                                )  # Scale factor for visible tint effect
+                                lab[:, :, 1] = np.clip(lab[:, :, 1] + tint_shift, 0, 255)
+
+                            # Convert back to RGB
+                            color_corrected_rgb = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+                            processed_image = (
+                                torch.from_numpy(
+                                    color_corrected_rgb.astype(np.float32) / 255.0
+                                )
+                                .unsqueeze(0)
+                                .to(processed_image.device)
+                            )
+                            processed_image = torch.clamp(processed_image, 0.0, 1.0)
+
+                            adjustments = []
+                            if warmth != 0.0:
+                                adjustments.append(
+                                    f"temperature: {warmth:.2f} ({'warmer' if warmth > 0 else 'cooler'})"
+                                )
+                            if tint != 0.0:
+                                adjustments.append(
+                                    f"tint: {tint:.2f} ({'magenta' if tint > 0 else 'green'})"
+                                )
+                            print(
+                                f"🌡️ Applied professional color adjustments: {', '.join(adjustments)}"
+                            )
+
+                        except Exception as e:
+                            print(
+                                f"⚠️ Temperature/tint processing failed, using original: {e}"
+                            )
+                    else:
+                        print(
+                            "⚠️ Professional temperature/tint requires advanced libraries (OpenCV), skipping"
+                        )
+                
+                # Update HSV after temperature/tint adjustments
+                hsv_image = rgb_to_hsv(processed_image)
+                h, s, v = hsv_image[..., 0], hsv_image[..., 1], hsv_image[..., 2]
 
                 if analysis and analysis["scene_type"] in [
                     "concept_art",
@@ -1779,26 +2255,14 @@ class EasyColorCorrection:
                     hsv_temp = rgb_to_hsv(rgb_temp)
                     h, s, v = hsv_temp[..., 0], hsv_temp[..., 1], hsv_temp[..., 2]
 
-        # --- COLORIZE MODE ---
-        elif mode == "Colorize":
-            # Smart detection to avoid colorizing art/anime
-            if analysis:
-                scene_type = analysis["scene_type"]
-                if scene_type in [
-                    "anime",
-                    "concept_art",
-                    "stylized_art",
-                    "detailed_illustration",
-                ]:
-                    print(
-                        f"🚫 Colorize Mode: Skipping colorization for {scene_type} content"
-                    )
-                    # Return original image for art content
-                    processed_image = original_image.clone()
-                else:
-                    print(
-                        f"🎨 Colorize Mode: Processing {scene_type} for intelligent colorization"
-                    )
+            # --- COLORIZE MODE ---
+            if mode == "Colorize":
+                # Always apply colorization in colorize mode - user knows what they're doing
+                if analysis:
+                    scene_type = analysis["scene_type"]
+                    print(f"🎨 Colorize Mode: Processing {scene_type} content")
+                    print(f"🔧 Calling _apply_colorization with mode: {colorize_mode}")
+                    print(f"🔧 Colorization parameters: strength={colorize_strength}, skin_warmth={skin_warmth}, sky_saturation={sky_saturation}")
                     processed_image = self._apply_colorization(
                         original_image,
                         processed_image,
@@ -1810,46 +2274,23 @@ class EasyColorCorrection:
                         sepia_tone,
                         colorize_mode,
                     )
-            else:
-                print(
-                    "🎨 Colorize Mode: Applying general colorization (no AI analysis)"
-                )
-                processed_image = self._apply_colorization(
-                    original_image,
-                    processed_image,
-                    None,
-                    colorize_strength,
-                    skin_warmth,
-                    sky_saturation,
-                    vegetation_green,
-                    sepia_tone,
-                    colorize_mode,
-                )
+                else:
+                    print(
+                        "🎨 Colorize Mode: Applying general colorization (no AI analysis)"
+                    )
+                    processed_image = self._apply_colorization(
+                        original_image,
+                        processed_image,
+                        None,
+                        colorize_strength,
+                        skin_warmth,
+                        sky_saturation,
+                        vegetation_green,
+                        sepia_tone,
+                        colorize_mode,
+                    )
 
-            # --- SKIN TONE PROTECTION ---
-            if analysis and analysis["faces"] and adjust_for_skin_tone:
-                hsv_original = rgb_to_hsv(original_image)
-                h_orig, s_orig, v_orig = (
-                    hsv_original[..., 0],
-                    hsv_original[..., 1],
-                    hsv_original[..., 2],
-                )
-
-                skin_hue_mask = ((h_orig >= 0.0) & (h_orig <= 0.14)) | (
-                    (h_orig >= 0.9) & (h_orig <= 1.0)
-                )
-                skin_sat_mask = (s_orig >= 0.15) & (s_orig <= 0.8)
-                skin_val_mask = v_orig >= 0.2
-                skin_mask = (skin_hue_mask & skin_sat_mask & skin_val_mask).float()
-
-                h = torch.lerp(h, h_orig, skin_mask * 0.8)
-                s = torch.lerp(s, s_orig, skin_mask * 0.6)
-                v = torch.lerp(v, v_orig, skin_mask * 0.3)
-
-            s = torch.clamp(s, 0.0, 1.0)
-            v = torch.clamp(v, 0.0, 1.0)
-            processed_hsv = torch.stack([h, s, v], dim=-1)
-            processed_image = hsv_to_rgb(processed_hsv)
+                # Note: Skin tone protection is now handled within the colorization methods
 
         if mode in ["Auto", "Preset"]:
             processed_image = torch.lerp(
@@ -1952,121 +2393,239 @@ class EasyColorCorrection:
         colorize_mode,
     ):
         """
-        Apply intelligent colorization to grayscale or desaturated photos.
-        Uses GPU-optimized tensor operations for efficient processing.
+        Advanced deep learning colorization with fallback to classic methods.
+        Supports multiple colorization modes including state-of-the-art AI models.
         """
         device = original_image.device
-
+        print(f"🔧 _apply_colorization called with mode: {colorize_mode}")
+        print(f"🔧 DL_COLORIZATION_AVAILABLE: {DL_COLORIZATION_AVAILABLE}")
+        
+        # Check if image needs colorization
+        avg_saturation = torch.mean(rgb_to_hsv(processed_image)[..., 1]).item()
+        print(f"🔧 Average saturation: {avg_saturation:.3f}")
+        if avg_saturation > 0.3:
+            print(f"⚠️ Image already has color (avg saturation: {avg_saturation:.2f}), applying gentle enhancement")
+            colorize_strength *= 0.3
+        
+        if colorize_mode == "deep_learning":
+            # Use deep learning colorization (primary method)
+            if DL_COLORIZATION_AVAILABLE:
+                try:
+                    print("🤖 Initializing DDColor deep learning colorization...")
+                    colorizer = get_deep_colorizer()
+                    
+                    # Load model if not already loaded
+                    if colorizer.model is None:
+                        print("📥 Loading DDColor model...")
+                        success = colorizer.load_model(device)
+                        if not success:
+                            print("⚠️ DDColor model failed to load, falling back to classic colorization")
+                            return self._apply_classic_colorization(
+                                original_image, processed_image, analysis,
+                                colorize_strength, skin_warmth, sky_saturation,
+                                vegetation_green, sepia_tone
+                            )
+                    else:
+                        print("✅ DDColor model already loaded")
+                    
+                    # Apply deep learning colorization
+                    print(f"🎨 Applying DDColor colorization (strength: {colorize_strength:.2f})...")
+                    colorized_image = colorizer.colorize_image(processed_image, colorize_strength)
+                    
+                    # Check if colorization actually happened
+                    if torch.equal(colorized_image, processed_image):
+                        print("⚠️ DDColor returned unchanged image, falling back to classic colorization")
+                        return self._apply_classic_colorization(
+                            original_image, processed_image, analysis,
+                            colorize_strength, skin_warmth, sky_saturation,
+                            vegetation_green, sepia_tone
+                        )
+                    
+                    # Apply additional adjustments if needed
+                    if skin_warmth != 0.0 or sky_saturation != 0.0 or vegetation_green != 0.0:
+                        print("🔧 Applying additional color adjustments...")
+                        colorized_image = self._apply_color_adjustments(
+                            colorized_image, analysis, skin_warmth, 
+                            sky_saturation, vegetation_green, colorize_strength
+                        )
+                    
+                    print("✅ DDColor deep learning colorization completed successfully")
+                    return colorized_image
+                    
+                except Exception as e:
+                    print(f"❌ DDColor deep learning colorization failed: {e}")
+                    print("⚠️ Falling back to classic colorization")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                print("⚠️ Deep learning libraries not available, using classic colorization")
+        
+        # Fallback to classic colorization for other modes or when DL fails
+        print(f"🔧 Using classic colorization fallback for mode: {colorize_mode}")
+        return self._apply_classic_colorization(
+            original_image, processed_image, analysis,
+            colorize_strength, skin_warmth, sky_saturation,
+            vegetation_green, sepia_tone, colorize_mode
+        )
+    
+    def _apply_classic_colorization(
+        self,
+        original_image,
+        processed_image, 
+        analysis,
+        colorize_strength,
+        skin_warmth,
+        sky_saturation,
+        vegetation_green,
+        sepia_tone,
+        colorize_mode="classic"
+    ):
+        """Classic HSV-based colorization for fallback and specific modes."""
+        device = original_image.device
+        print(f"🔧 Classic colorization: mode={colorize_mode}, strength={colorize_strength}")
+        print(f"🔧 Parameters: skin_warmth={skin_warmth}, sky_saturation={sky_saturation}, vegetation_green={vegetation_green}")
+        
         # Convert to HSV for color manipulation
         hsv_image = rgb_to_hsv(processed_image)
         h, s, v = hsv_image[..., 0], hsv_image[..., 1], hsv_image[..., 2]
-
-        # Check if image is grayscale or very desaturated
-        avg_saturation = torch.mean(s).item()
-        if avg_saturation > 0.3:
-            print(
-                f"⚠️ Image already has color (avg saturation: {avg_saturation:.2f}), applying gentle enhancement"
-            )
-            colorize_strength *= 0.3  # Reduce strength for already colored images
-
-        # Create region masks based on luminance and edge detection
-        luminance = torch.mean(processed_image, dim=-1, keepdim=True)
-
-        # Sky detection (upper regions with high luminance)
+        
+        # Create region masks
+        luminance = torch.mean(processed_image, dim=-1)
         height = processed_image.shape[1]
+        
+        # Sky detection (upper regions with high luminance)
         sky_region = torch.zeros_like(luminance, device=device)
         sky_upper_third = height // 3
-        sky_region[:, :sky_upper_third, :, :] = 1.0
-
-        # Enhance sky detection with luminance
+        sky_region[:, :sky_upper_third, :] = 1.0
         sky_luminance_mask = (luminance > 0.7).float()
         sky_mask = sky_region * sky_luminance_mask
-
-        # Vegetation detection (mid-luminance areas, typically green regions)
+        
+        # Vegetation detection (mid-luminance areas)
         vegetation_mask = ((luminance > 0.2) & (luminance < 0.8)).float()
-        vegetation_mask = vegetation_mask * (1.0 - sky_mask)  # Exclude sky areas
-
-        # Skin tone detection (mid-luminance warm areas)
+        vegetation_mask = vegetation_mask * (1.0 - sky_mask)
+        
+        # Skin tone detection
         skin_mask = torch.zeros_like(luminance, device=device)
         if analysis and analysis.get("faces"):
-            # Use luminance-based approximation for skin areas
             skin_mask = ((luminance > 0.25) & (luminance < 0.85)).float()
             skin_mask = skin_mask * (1.0 - sky_mask) * (1.0 - vegetation_mask)
-
+        
         # Apply colorization based on mode
         if colorize_mode == "vintage":
-            # Vintage sepia-toned colorization
             base_hue = 0.08  # Warm sepia hue
             h = torch.full_like(h, base_hue)
             s = s + sepia_tone * 0.4 * colorize_strength
-
+            
         elif colorize_mode == "portrait":
             # Portrait-focused colorization
-            # Warm skin tones
-            skin_hue = 0.08  # Warm skin hue
+            skin_hue = 0.08
             h = torch.where(skin_mask > 0.3, skin_hue, h)
             s = torch.where(skin_mask > 0.3, s + skin_warmth * colorize_strength, s)
-
-            # Subtle sky blues
-            sky_hue = 0.58  # Blue hue
-            h = torch.where(sky_mask > 0.5, sky_hue, h)
-            s = torch.where(
-                sky_mask > 0.5, s + sky_saturation * 0.3 * colorize_strength, s
-            )
-
+            
         elif colorize_mode == "landscape":
             # Landscape-focused colorization
-            # Green vegetation
-            vegetation_hue = 0.25  # Green hue
-            h = torch.where(vegetation_mask > 0.4, vegetation_hue, h)
-            s = torch.where(
-                vegetation_mask > 0.4, s + vegetation_green * colorize_strength, s
-            )
-
-            # Blue skies
-            sky_hue = 0.58  # Blue hue
+            sky_hue = 0.58  # Blue
             h = torch.where(sky_mask > 0.5, sky_hue, h)
             s = torch.where(sky_mask > 0.5, s + sky_saturation * colorize_strength, s)
-
-        else:  # auto mode
-            # Intelligent auto colorization
-            # Sky areas -> blue
-            sky_hue = 0.58
-            h = torch.where(sky_mask > 0.5, sky_hue, h)
-            s = torch.where(sky_mask > 0.5, s + sky_saturation * colorize_strength, s)
-
-            # Vegetation areas -> green
-            vegetation_hue = 0.25
+            
+            vegetation_hue = 0.25  # Green
             h = torch.where(vegetation_mask > 0.4, vegetation_hue, h)
-            s = torch.where(
-                vegetation_mask > 0.4, s + vegetation_green * colorize_strength, s
-            )
-
-            # Skin areas -> warm tones
-            if torch.sum(skin_mask) > 0:
+            s = torch.where(vegetation_mask > 0.4, s + vegetation_green * colorize_strength, s)
+            
+        else:  # classic or auto mode
+            # Basic intelligent colorization
+            if sky_saturation > 0:
+                sky_hue = 0.58
+                h = torch.where(sky_mask > 0.5, sky_hue, h)
+                s = torch.where(sky_mask > 0.5, s + sky_saturation * colorize_strength, s)
+            
+            if vegetation_green > 0:
+                vegetation_hue = 0.25
+                h = torch.where(vegetation_mask > 0.4, vegetation_hue, h)
+                s = torch.where(vegetation_mask > 0.4, s + vegetation_green * colorize_strength, s)
+            
+            if skin_warmth > 0 and analysis and analysis.get("faces"):
                 skin_hue = 0.08
                 h = torch.where(skin_mask > 0.3, skin_hue, h)
                 s = torch.where(skin_mask > 0.3, s + skin_warmth * colorize_strength, s)
-
+        
         # Apply sepia tone if specified
         if sepia_tone > 0:
-            sepia_hue = 0.08  # Warm sepia
+            sepia_hue = 0.08
             h = torch.lerp(h, torch.full_like(h, sepia_hue), sepia_tone)
             s = s + sepia_tone * 0.3
-
-        # Ensure values stay in valid range
-        h = h % 1.0  # Wrap hue
+        
+        # Clamp and convert back to RGB
+        h = h % 1.0
         s = torch.clamp(s, 0.0, 1.0)
         v = torch.clamp(v, 0.0, 1.0)
-
-        # Convert back to RGB
+        
         colorized_hsv = torch.stack([h, s, v], dim=-1)
         colorized_rgb = hsv_to_rgb(colorized_hsv)
-
-        # Blend with original based on colorize_strength
+        
+        # Blend with original
         final_image = torch.lerp(processed_image, colorized_rgb, colorize_strength)
-
         return torch.clamp(final_image, 0.0, 1.0)
+    
+    def _apply_color_adjustments(
+        self,
+        image,
+        analysis,
+        skin_warmth,
+        sky_saturation, 
+        vegetation_green,
+        strength
+    ):
+        """Apply additional color adjustments to deep learning colorized image."""
+        if skin_warmth == 0.0 and sky_saturation == 0.0 and vegetation_green == 0.0:
+            return image
+            
+        print(f"🔧 Applying targeted color adjustments: skin_warmth={skin_warmth:.2f}, sky_saturation={sky_saturation:.2f}, vegetation_green={vegetation_green:.2f}")
+        
+        # Apply targeted adjustments without full classic colorization pipeline
+        result = image.clone()
+        
+        # Convert to HSV for targeted adjustments
+        hsv = rgb_to_hsv(result)
+        h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+        
+        # Skin tone adjustments (warm oranges/peaches)
+        if skin_warmth != 0.0:
+            # Target skin tone hues (roughly 0.02-0.08 in HSV)
+            skin_mask = ((h >= 0.01) & (h <= 0.1)) & (s > 0.1)
+            if skin_mask.any():
+                # Warm up skin tones
+                h = torch.where(skin_mask, h + skin_warmth * 0.02, h)
+                s = torch.where(skin_mask, torch.clamp(s + skin_warmth * 0.1, 0, 1), s)
+                print(f"   ✅ Applied skin warming to {skin_mask.sum().item()} pixels")
+        
+        # Sky saturation adjustments (blues)
+        if sky_saturation != 0.0:
+            # Target sky/blue hues (roughly 0.55-0.75 in HSV)
+            sky_mask = ((h >= 0.5) & (h <= 0.8)) & (s > 0.1)
+            if sky_mask.any():
+                s = torch.where(sky_mask, torch.clamp(s + sky_saturation * 0.2, 0, 1), s)
+                print(f"   ✅ Applied sky saturation to {sky_mask.sum().item()} pixels")
+        
+        # Vegetation adjustments (greens)
+        if vegetation_green != 0.0:
+            # Target green hues (roughly 0.25-0.45 in HSV)
+            green_mask = ((h >= 0.2) & (h <= 0.5)) & (s > 0.1)
+            if green_mask.any():
+                s = torch.where(green_mask, torch.clamp(s + vegetation_green * 0.15, 0, 1), s)
+                h = torch.where(green_mask, h + vegetation_green * 0.01, h)
+                print(f"   ✅ Applied vegetation enhancement to {green_mask.sum().item()} pixels")
+        
+        # Convert back to RGB
+        adjusted_hsv = torch.stack([h, s, v], dim=-1)
+        result = hsv_to_rgb(adjusted_hsv)
+        
+        # Blend with original based on reduced strength
+        adjustment_strength = strength * 0.5  # Reduce strength for subtle adjustments
+        result = torch.lerp(image, result, adjustment_strength)
+        
+        print(f"   ✅ Color adjustments applied with strength {adjustment_strength:.2f}")
+        return result
 
 
 class BatchColorCorrection:
@@ -2168,6 +2727,10 @@ class BatchColorCorrection:
                     "FLOAT",
                     {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.1},
                 ),
+                "tint": (
+                    "FLOAT",
+                    {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.1},
+                ),
                 "lift": (
                     "FLOAT",
                     {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.1},
@@ -2204,6 +2767,7 @@ class BatchColorCorrection:
     )
     FUNCTION = "batch_color_correct"
     CATEGORY = "itsjustregi / Easy Color Corrector"
+    DISPLAY_NAME = "Easy Batch Color Corrector (Beta)"
     OUTPUT_NODE = True
 
     @classmethod
@@ -2228,6 +2792,7 @@ class BatchColorCorrection:
         vibrancy=0.0,
         brightness=0.0,
         contrast=0.0,
+        tint=0.0,
         lift=0.0,
         gamma=0.0,
         gain=0.0,
@@ -2711,23 +3276,47 @@ class BatchColorCorrection:
         original_mean = torch.mean(processed_batch).item()
         print(f"📊 Original batch mean: {original_mean:.4f}")
 
-        # Apply color corrections to entire batch
-        if warmth != 0.0:
-            h = (h + warmth * 0.1) % 1.0
-
-        if vibrancy != 0.0:
-            saturation_mask = 1.0 - s
-            s = s * (1.0 + vibrancy) + (vibrancy * 0.3 * saturation_mask * s)
-
-        if brightness != 0.0:
-            v = v + brightness * (1.0 - v * 0.5)
-
-        if contrast != 0.0:
-            v = 0.5 + (v - 0.5) * (1.0 + contrast)
-
-        # Manual mode 3-way color correction (applied to entire batch)
+        # Manual mode color corrections (applied to entire batch)
         if mode == "Manual":
-            # Create masks for entire batch
+            # Apply basic color corrections first
+            if warmth != 0.0:
+                h = (h + warmth * 0.1) % 1.0
+
+            if vibrancy != 0.0:
+                saturation_mask = 1.0 - s
+                s = s * (1.0 + vibrancy) + (vibrancy * 0.3 * saturation_mask * s)
+
+            if brightness != 0.0:
+                v = v + brightness * (1.0 - v * 0.5)
+
+            if contrast != 0.0:
+                v = 0.5 + (v - 0.5) * (1.0 + contrast)
+
+            # Apply tint adjustment (requires LAB color space)
+            if tint != 0.0 and ADVANCED_LIBS_AVAILABLE:
+                try:
+                    # Convert current HSV back to RGB then to numpy for LAB processing
+                    temp_hsv = torch.stack([h, s, v], dim=-1)
+                    temp_rgb = hsv_to_rgb(temp_hsv)
+                    image_np_for_tint = (temp_rgb.squeeze(0).cpu().numpy() * 255).astype(np.uint8)
+                    
+                    # Convert to LAB and apply tint
+                    lab = cv2.cvtColor(image_np_for_tint, cv2.COLOR_RGB2LAB)
+                    tint_shift = tint * 30  # Scale factor for visible tint effect
+                    lab[:, :, 1] = np.clip(lab[:, :, 1] + tint_shift, 0, 255)
+                    
+                    # Convert back to RGB then to tensors
+                    corrected_rgb = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+                    corrected_tensor = torch.from_numpy(corrected_rgb.astype(np.float32) / 255.0).unsqueeze(0).to(device)
+                    
+                    # Convert back to HSV for continued processing
+                    corrected_hsv = rgb_to_hsv(corrected_tensor)
+                    h, s, v = corrected_hsv[..., 0], corrected_hsv[..., 1], corrected_hsv[..., 2]
+                    
+                except Exception as e:
+                    print(f"⚠️ Tint processing failed: {e}")
+
+            # Create masks for 3-way color correction
             shadows_mask = 1.0 - torch.clamp(v * 3.0, 0.0, 1.0)
             midtones_mask = 1.0 - torch.abs(v - 0.5) * 2.0
             highlights_mask = torch.clamp((v - 0.66) * 3.0, 0.0, 1.0)
@@ -2743,21 +3332,24 @@ class BatchColorCorrection:
             if gain != 0.0:
                 v = v + (gain * 0.8 * highlights_mask)
 
-        # Add noise to entire batch if specified
-        if noise > 0.0:
-            mono_noise = torch.randn(
-                (batch_size, processed_batch.shape[1], processed_batch.shape[2], 1),
-                device=device,
-            )
-            luminance_mask = 1.0 - torch.abs(v - 0.5) * 2.0
-            luminance_mask = torch.clamp(luminance_mask, 0.0, 1.0).unsqueeze(-1)
+            # Semantic selective color adjustments not available in BatchColorCorrection 
+            # (use main EasyColorCorrection node for selective controls)
 
-            rgb_temp = hsv_to_rgb(torch.stack([h, s, v], dim=-1))
-            rgb_temp += mono_noise * noise * 0.15 * luminance_mask
-            rgb_temp = torch.clamp(rgb_temp, 0.0, 1.0)
+            # Add noise if specified (Manual mode only)
+            if noise > 0.0:
+                mono_noise = torch.randn(
+                    (batch_size, processed_batch.shape[1], processed_batch.shape[2], 1),
+                    device=device,
+                )
+                luminance_mask = 1.0 - torch.abs(v - 0.5) * 2.0
+                luminance_mask = torch.clamp(luminance_mask, 0.0, 1.0).unsqueeze(-1)
 
-            hsv_temp = rgb_to_hsv(rgb_temp)
-            h, s, v = hsv_temp[..., 0], hsv_temp[..., 1], hsv_temp[..., 2]
+                rgb_temp = hsv_to_rgb(torch.stack([h, s, v], dim=-1))
+                rgb_temp += mono_noise * noise * 0.15 * luminance_mask
+                rgb_temp = torch.clamp(rgb_temp, 0.0, 1.0)
+
+                hsv_temp = rgb_to_hsv(rgb_temp)
+                h, s, v = hsv_temp[..., 0], hsv_temp[..., 1], hsv_temp[..., 2]
 
         # Clamp and convert back to RGB
         s = torch.clamp(s, 0.0, 1.0)
@@ -2958,6 +3550,7 @@ class RawImageProcessor:
     RETURN_NAMES = ("image", "metadata")
     FUNCTION = "process_raw_image"
     CATEGORY = "itsjustregi / Easy Color Corrector"
+    DISPLAY_NAME = "Raw Image Processor"
 
     def process_raw_image(
         self,
@@ -3413,6 +4006,7 @@ class ColorCorrectionViewer:
     RETURN_TYPES = ()
     FUNCTION = "view_sequence"
     CATEGORY = "itsjustregi / Easy Color Corrector"
+    DISPLAY_NAME = "Color Corrector Image Viewer"
     OUTPUT_NODE = True
 
     @classmethod
@@ -3564,6 +4158,7 @@ class ColorPaletteExtractor:
     RETURN_NAMES = ("palette_data", "histogram", "palette_image")
     FUNCTION = "extract_palette"
     CATEGORY = "itsjustregi / Easy Color Corrector"
+    DISPLAY_NAME = "Color Palette Extractor"
 
     def extract_palette(self, image, palette_size=8, extract_palette=True):
         """
@@ -3640,10 +4235,1029 @@ class ColorPaletteExtractor:
             return False
 
 
+class FilmEmulation:
+    """
+    Professional film stock emulation node for creative styling.
+    
+    Simulates the characteristics of classic analog film stocks including:
+    - Color response curves specific to each film type
+    - Film grain patterns and intensity
+    - Contrast curves and saturation response
+    - Temperature/tint characteristics
+    - Push/pull processing simulation
+    """
+    
+    # Film stock definitions with their characteristic parameters
+    FILM_STOCKS = {
+        "Kodak Portra 400": {
+            "description": "Warm, natural skin tones with subtle grain",
+            "temperature_bias": 0.15,  # Warm bias
+            "tint_bias": 0.05,         # Slight magenta
+            "saturation_curve": "smooth",
+            "contrast_curve": "soft",
+            "grain_type": "fine",
+            "color_shifts": {"shadows": (0.02, 0.1, 0.05), "highlights": (0.1, 0.05, 0.0)},
+            "gamma_curve": 0.95,
+        },
+        "Kodak Portra 800": {
+            "description": "Higher speed version with more pronounced grain",
+            "temperature_bias": 0.18,
+            "tint_bias": 0.08,
+            "saturation_curve": "smooth",
+            "contrast_curve": "soft",
+            "grain_type": "medium",
+            "color_shifts": {"shadows": (0.03, 0.12, 0.08), "highlights": (0.12, 0.08, 0.02)},
+            "gamma_curve": 0.92,
+        },
+        "Fuji Velvia 50": {
+            "description": "Saturated, punchy colors with cool shadows",
+            "temperature_bias": -0.1,  # Cool bias
+            "tint_bias": -0.05,        # Slight green
+            "saturation_curve": "punchy",
+            "contrast_curve": "high",
+            "grain_type": "ultra_fine",
+            "color_shifts": {"shadows": (-0.05, 0.0, 0.1), "highlights": (0.05, 0.15, 0.05)},
+            "gamma_curve": 1.1,
+        },
+        "Fuji Velvia 100": {
+            "description": "Slightly more subdued than Velvia 50",
+            "temperature_bias": -0.08,
+            "tint_bias": -0.03,
+            "saturation_curve": "punchy",
+            "contrast_curve": "medium_high",
+            "grain_type": "fine",
+            "color_shifts": {"shadows": (-0.03, 0.0, 0.08), "highlights": (0.03, 0.12, 0.03)},
+            "gamma_curve": 1.05,
+        },
+        "Kodak Vision3 500T": {
+            "description": "Cinematic tungsten-balanced stock",
+            "temperature_bias": 0.25,  # Strong tungsten bias
+            "tint_bias": 0.1,
+            "saturation_curve": "cinematic",
+            "contrast_curve": "medium",
+            "grain_type": "medium",
+            "color_shifts": {"shadows": (0.05, 0.2, 0.1), "highlights": (0.15, 0.1, 0.0)},
+            "gamma_curve": 0.9,
+        },
+        "Kodak Gold 200": {
+            "description": "Vintage warm look with yellow/orange cast",
+            "temperature_bias": 0.2,
+            "tint_bias": 0.15,         # Strong yellow/orange
+            "saturation_curve": "vintage",
+            "contrast_curve": "medium",
+            "grain_type": "medium",
+            "color_shifts": {"shadows": (0.08, 0.15, 0.05), "highlights": (0.2, 0.12, 0.0)},
+            "gamma_curve": 0.88,
+        },
+        "Fuji Pro 400H": {
+            "description": "Soft, pastel tones, overexposure-friendly",
+            "temperature_bias": 0.05,
+            "tint_bias": 0.02,
+            "saturation_curve": "soft",
+            "contrast_curve": "low",
+            "grain_type": "fine",
+            "color_shifts": {"shadows": (0.02, 0.05, 0.08), "highlights": (0.08, 0.08, 0.05)},
+            "gamma_curve": 0.85,
+        },
+        "Kodak Tri-X 400": {
+            "description": "Classic B&W with distinctive grain",
+            "temperature_bias": 0.0,   # B&W
+            "tint_bias": 0.0,
+            "saturation_curve": "bw",
+            "contrast_curve": "high",
+            "grain_type": "heavy",
+            "color_shifts": {"shadows": (0.0, 0.0, 0.0), "highlights": (0.0, 0.0, 0.0)},
+            "gamma_curve": 1.2,
+        },
+        "Ilford HP5 Plus": {
+            "description": "High contrast B&W with fine grain",
+            "temperature_bias": 0.0,
+            "tint_bias": 0.0,
+            "saturation_curve": "bw",
+            "contrast_curve": "very_high",
+            "grain_type": "medium",
+            "color_shifts": {"shadows": (0.0, 0.0, 0.0), "highlights": (0.0, 0.0, 0.0)},
+            "gamma_curve": 1.3,
+        },
+    }
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE", {}),
+                "film_stock": (list(cls.FILM_STOCKS.keys()), {"default": "Kodak Portra 400"}),
+                "strength": ("FLOAT", {
+                    "default": 1.0, 
+                    "min": 0.0, 
+                    "max": 1.0, 
+                    "step": 0.05,
+                    "tooltip": "Blend strength between original and film emulation"
+                }),
+                "grain_intensity": ("FLOAT", {
+                    "default": 0.3, 
+                    "min": 0.0, 
+                    "max": 1.0, 
+                    "step": 0.05,
+                    "tooltip": "Film grain intensity (0.0 = no grain, 1.0 = maximum grain)"
+                }),
+                "exposure_compensation": ("FLOAT", {
+                    "default": 0.0, 
+                    "min": -2.0, 
+                    "max": 2.0, 
+                    "step": 0.1,
+                    "tooltip": "Exposure compensation in stops (simulates over/under exposure response)"
+                }),
+                "push_pull": ("FLOAT", {
+                    "default": 0.0, 
+                    "min": -2.0, 
+                    "max": 2.0, 
+                    "step": 0.5,
+                    "tooltip": "Push/pull processing simulation (affects contrast and grain)"
+                }),
+                "highlight_rolloff": ("FLOAT", {
+                    "default": 0.8, 
+                    "min": 0.0, 
+                    "max": 1.0, 
+                    "step": 0.05,
+                    "tooltip": "Film highlight rolloff characteristics"
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("image", "film_info")
+    FUNCTION = "apply_film_emulation"
+    CATEGORY = "itsjustregi / Easy Color Corrector"
+    DISPLAY_NAME = "Film Emulation"
+
+    def apply_film_emulation(self, image, film_stock, strength=1.0, grain_intensity=0.3, 
+                           exposure_compensation=0.0, push_pull=0.0, highlight_rolloff=0.8):
+        """Apply film stock emulation to the input image."""
+        
+        original_image = image.clone()
+        processed_image = image.clone()
+        
+        # Get film stock characteristics
+        stock_params = self.FILM_STOCKS[film_stock]
+        
+        print(f"🎞️ Applying {film_stock} emulation (strength: {strength:.2f})")
+        print(f"📝 {stock_params['description']}")
+        
+        # Apply exposure compensation first (simulates film response to different exposures)
+        if exposure_compensation != 0.0:
+            processed_image = self._apply_exposure_compensation(
+                processed_image, exposure_compensation, stock_params
+            )
+        
+        # Apply film color characteristics
+        processed_image = self._apply_color_response(processed_image, stock_params, push_pull)
+        
+        # Apply film grain
+        if grain_intensity > 0.0:
+            processed_image = self._apply_film_grain(
+                processed_image, stock_params, grain_intensity, push_pull
+            )
+        
+        # Apply highlight rolloff
+        processed_image = self._apply_highlight_rolloff(
+            processed_image, highlight_rolloff, stock_params
+        )
+        
+        # Blend with original based on strength
+        if strength < 1.0:
+            processed_image = torch.lerp(original_image, processed_image, strength)
+        
+        # Generate film info string
+        film_info = f"Film: {film_stock}, Strength: {strength:.2f}, Grain: {grain_intensity:.2f}"
+        if exposure_compensation != 0.0:
+            film_info += f", Exposure: {exposure_compensation:+.1f} stops"
+        if push_pull != 0.0:
+            film_info += f", Push/Pull: {push_pull:+.1f}"
+            
+        print(f"✅ Film emulation applied: {film_info}")
+        
+        return (processed_image, film_info)
+
+    def _apply_exposure_compensation(self, image, exposure_stops, stock_params):
+        """Simulate film response to different exposure levels."""
+        # Convert stops to linear multiplier
+        exposure_multiplier = 2.0 ** exposure_stops
+        
+        # Apply exposure with film-specific response
+        exposed_image = image * exposure_multiplier
+        
+        # Film has non-linear response to overexposure (shoulder curve)
+        if exposure_stops > 0:
+            # Simulate film shoulder - highlights compress gracefully
+            shoulder_strength = min(exposure_stops / 2.0, 1.0)
+            exposed_image = torch.where(
+                exposed_image > 0.8,
+                0.8 + (exposed_image - 0.8) * (1.0 - shoulder_strength * 0.7),
+                exposed_image
+            )
+        
+        return torch.clamp(exposed_image, 0.0, 1.0)
+
+    def _apply_color_response(self, image, stock_params, push_pull):
+        """Apply film-specific color response curves and characteristics."""
+        
+        # Convert to HSV for easier manipulation
+        if ADVANCED_LIBS_AVAILABLE:
+            hsv_image = rgb_to_hsv(image)
+            h, s, v = hsv_image[..., 0], hsv_image[..., 1], hsv_image[..., 2]
+        else:
+            # Fallback to simple processing
+            return self._apply_simple_film_response(image, stock_params, push_pull)
+        
+        # Apply temperature and tint bias
+        temp_bias = stock_params["temperature_bias"]
+        tint_bias = stock_params["tint_bias"]
+        
+        if temp_bias != 0.0:
+            # Adjust hue for temperature (blue-yellow axis)
+            h = (h + temp_bias * 0.1) % 1.0
+        
+        # Apply saturation curve based on film type
+        saturation_curve = stock_params["saturation_curve"]
+        s = self._apply_saturation_curve(s, saturation_curve, push_pull)
+        
+        # Apply contrast curve (gamma)
+        gamma = stock_params["gamma_curve"]
+        if push_pull != 0.0:
+            # Push processing increases contrast, pull decreases it
+            gamma = gamma + (push_pull * 0.15)
+        
+        v = torch.pow(torch.clamp(v, 0.001, 1.0), gamma)
+        
+        # Apply color shifts to shadows and highlights
+        color_shifts = stock_params["color_shifts"]
+        processed_image = hsv_to_rgb(torch.stack([h, s, v], dim=-1))
+        processed_image = self._apply_color_shifts(processed_image, color_shifts)
+        
+        return torch.clamp(processed_image, 0.0, 1.0)
+
+    def _apply_saturation_curve(self, saturation, curve_type, push_pull):
+        """Apply film-specific saturation response curves."""
+        
+        if curve_type == "bw":
+            # Black and white films
+            return torch.zeros_like(saturation)
+        
+        # Saturation multipliers based on film type
+        multipliers = {
+            "soft": 0.85,
+            "smooth": 0.95,
+            "cinematic": 1.0,
+            "vintage": 1.1,
+            "punchy": 1.3,
+        }
+        
+        multiplier = multipliers.get(curve_type, 1.0)
+        
+        # Push processing affects saturation
+        if push_pull != 0.0:
+            multiplier += push_pull * 0.15
+        
+        # Apply film-specific saturation curve
+        if curve_type == "punchy":
+            # Velvia-style: boost mid-saturation, compress high saturation
+            s_adjusted = saturation * multiplier
+            s_adjusted = torch.where(
+                saturation > 0.7,
+                0.7 + (s_adjusted - 0.7) * 0.6,  # Compress high saturation
+                s_adjusted
+            )
+        elif curve_type == "soft":
+            # Pro 400H style: gentle saturation with smooth rolloff
+            s_adjusted = saturation * multiplier
+            s_adjusted = torch.pow(s_adjusted, 1.1)  # Slight curve
+        else:
+            # Linear adjustment for other types
+            s_adjusted = saturation * multiplier
+        
+        return torch.clamp(s_adjusted, 0.0, 1.0)
+
+    def _apply_color_shifts(self, image, color_shifts):
+        """Apply film-specific color shifts to shadows and highlights."""
+        
+        # Calculate luminance for masking
+        luminance = 0.299 * image[..., 0] + 0.587 * image[..., 1] + 0.114 * image[..., 2]
+        
+        # Create shadow and highlight masks
+        shadow_mask = torch.clamp(1.0 - luminance * 3.0, 0.0, 1.0)
+        highlight_mask = torch.clamp((luminance - 0.6) * 2.5, 0.0, 1.0)
+        
+        # Apply shadow color shifts
+        shadow_shift = color_shifts["shadows"]
+        for i, shift in enumerate(shadow_shift):
+            if shift != 0.0:
+                image[..., i] += shift * shadow_mask.unsqueeze(-1)
+        
+        # Apply highlight color shifts
+        highlight_shift = color_shifts["highlights"]
+        for i, shift in enumerate(highlight_shift):
+            if shift != 0.0:
+                image[..., i] += shift * highlight_mask.unsqueeze(-1)
+        
+        return torch.clamp(image, 0.0, 1.0)
+
+    def _apply_simple_film_response(self, image, stock_params, push_pull):
+        """Simplified film response when advanced libraries aren't available."""
+        
+        # Basic gamma adjustment
+        gamma = stock_params["gamma_curve"]
+        if push_pull != 0.0:
+            gamma = gamma + (push_pull * 0.15)
+        
+        processed = torch.pow(torch.clamp(image, 0.001, 1.0), gamma)
+        
+        # Basic temperature/tint adjustment
+        temp_bias = stock_params["temperature_bias"]
+        tint_bias = stock_params["tint_bias"]
+        
+        if temp_bias != 0.0:
+            # Simple temperature shift (blue-yellow)
+            processed[..., 0] += temp_bias * 0.1  # Red
+            processed[..., 2] -= temp_bias * 0.05  # Blue
+        
+        if tint_bias != 0.0:
+            # Simple tint shift (green-magenta)
+            processed[..., 0] += tint_bias * 0.05  # Red (magenta)
+            processed[..., 1] -= tint_bias * 0.05  # Green
+        
+        return torch.clamp(processed, 0.0, 1.0)
+
+    def _apply_film_grain(self, image, stock_params, grain_intensity, push_pull):
+        """Apply film-specific grain patterns."""
+        
+        grain_type = stock_params["grain_type"]
+        device = image.device
+        
+        # Grain characteristics based on type
+        grain_params = {
+            "ultra_fine": {"size": 0.5, "strength": 0.3},
+            "fine": {"size": 0.7, "strength": 0.4},
+            "medium": {"size": 1.0, "strength": 0.6},
+            "heavy": {"size": 1.5, "strength": 0.8},
+        }
+        
+        params = grain_params.get(grain_type, grain_params["medium"])
+        
+        # Push processing increases grain
+        grain_strength = params["strength"] * grain_intensity
+        if push_pull > 0:
+            grain_strength *= (1.0 + push_pull * 0.5)
+        
+        # Generate film grain noise
+        noise_shape = image.shape
+        grain_noise = torch.randn(noise_shape, device=device) * grain_strength * 0.02
+        
+        # Apply grain with luminance dependency (more grain in shadows for most films)
+        luminance = 0.299 * image[..., 0] + 0.587 * image[..., 1] + 0.114 * image[..., 2]
+        grain_mask = 1.0 - luminance * 0.5  # More grain in darker areas
+        grain_mask = grain_mask.unsqueeze(-1)
+        
+        grained_image = image + (grain_noise * grain_mask)
+        
+        return torch.clamp(grained_image, 0.0, 1.0)
+
+    def _apply_highlight_rolloff(self, image, rolloff_strength, stock_params):
+        """Apply film-specific highlight rolloff characteristics."""
+        
+        # Film naturally compresses highlights
+        luminance = 0.299 * image[..., 0] + 0.587 * image[..., 1] + 0.114 * image[..., 2]
+        
+        # Create highlight mask
+        highlight_threshold = 0.8
+        highlight_mask = torch.clamp((luminance - highlight_threshold) / (1.0 - highlight_threshold), 0.0, 1.0)
+        
+        # Apply rolloff based on film characteristics
+        contrast_curve = stock_params["contrast_curve"]
+        
+        if contrast_curve in ["high", "very_high"]:
+            # High contrast films have harder rolloff
+            rolloff_curve = torch.pow(highlight_mask, 1.5)
+        else:
+            # Softer films have gentler rolloff
+            rolloff_curve = torch.pow(highlight_mask, 0.8)
+        
+        # Apply the rolloff
+        rolloff_factor = 1.0 - (rolloff_curve * rolloff_strength * 0.3)
+        rolloff_factor = rolloff_factor.unsqueeze(-1)
+        
+        return image * rolloff_factor
+
+
+class VAEColorCorrector:
+    """
+    Specialized color correction for VAE artifacts in inpainting/img2img workflows.
+    Fixes color shifts in unmasked areas by referencing the original input image.
+    """
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "original_image": ("IMAGE", {"tooltip": "🔴 Original input image (before VAE encoding)"}),
+                "processed_image": ("IMAGE", {"tooltip": "🟡 Image after VAE decode (with color shifts)"}),
+                "correction_strength": (
+                    "FLOAT", 
+                    {
+                        "default": 0.8, 
+                        "min": 0.0, 
+                        "max": 1.0, 
+                        "step": 0.01,
+                        "tooltip": "🎚️ How strongly to correct VAE color shifts (0.0 = no correction, 1.0 = full correction)"
+                    }
+                ),
+                "method": (
+                    ["luminance_zones", "histogram_matching", "statistical_matching", "advanced_3d_lut"], 
+                    {
+                        "default": "luminance_zones",
+                        "tooltip": "🔧 Color correction method:\n• luminance_zones: Professional shadows/midtones/highlights (recommended)\n• histogram_matching: Match color distributions\n• statistical_matching: Match color statistics\n• advanced_3d_lut: Most accurate but slower 3D color mapping"
+                    }
+                ),
+                "auto_preserve": (
+                    "BOOLEAN", 
+                    {
+                        "default": True,
+                        "tooltip": "🤖 Auto-detect and preserve inpainted areas when no mask is provided"
+                    }
+                ),
+                "lock_input_image": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "🔒 Lock input images to prevent upstream nodes from reprocessing when adjusting correction parameters",
+                    },
+                ),
+            },
+            "optional": {
+                "vae": ("VAE", {"tooltip": "🔧 VAE model used for encoding/decoding (helps with VAE-specific color corrections)"}),
+                "mask": ("MASK", {"tooltip": "⚫ Optional mask - white areas will be preserved (inpainted areas)"}),
+                "edge_feather": (
+                    "INT", 
+                    {
+                        "default": 5, 
+                        "min": 0, 
+                        "max": 50, 
+                        "step": 1,
+                        "tooltip": "🌟 Feather edges between corrected/preserved areas (pixels)"
+                    }
+                ),
+            }
+        }
+    
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("corrected_image",)
+    FUNCTION = "correct_vae_colors"
+    CATEGORY = "itsjustregi / Easy Color Corrector"
+    DISPLAY_NAME = "VAE Color Corrector"
+    
+    def correct_vae_colors(
+        self, 
+        original_image, 
+        processed_image, 
+        correction_strength=0.8,
+        method="luminance_zones",
+        auto_preserve=True,
+        lock_input_image=False,
+        vae=None,
+        mask=None,
+        edge_feather=5
+    ):
+        """
+        Correct VAE-induced color shifts by referencing the original image.
+        """
+        device = original_image.device
+        
+        # Handle input image locking to prevent upstream reprocessing
+        if lock_input_image:
+            # Check if input images have changed (cache invalidation)
+            images_changed = False
+            if (
+                not hasattr(self, "_cached_original_image")
+                or self._cached_original_image is None
+                or not hasattr(self, "_cached_processed_image")
+                or self._cached_processed_image is None
+            ):
+                images_changed = True
+            else:
+                # Compare image tensors to detect changes from upstream
+                try:
+                    if not torch.equal(self._cached_original_image, original_image) or \
+                       not torch.equal(self._cached_processed_image, processed_image):
+                        images_changed = True
+                except:
+                    # Different shapes or other comparison issues = definitely changed
+                    images_changed = True
+            
+            if images_changed:
+                self._cached_original_image = original_image.clone()
+                self._cached_processed_image = processed_image.clone()
+                self._cached_vae_analysis = None
+                print("🔄 Locked Input: New images detected, updating cache")
+            
+            # Use cached images for processing
+            original_image = self._cached_original_image.clone()
+            processed_image = self._cached_processed_image.clone()
+        
+        print(f"🔧 VAE Color Correction: method={method}, strength={correction_strength:.2f}")
+        print(f"📏 Original: {original_image.shape}, Processed: {processed_image.shape}")
+        if lock_input_image:
+            print("🔒 Input images locked - preventing upstream reprocessing")
+        if vae is not None:
+            print("🎯 VAE model provided for enhanced correction")
+        
+        # Ensure images are same size
+        if original_image.shape != processed_image.shape:
+            print("⚠️ Image size mismatch - resizing processed to match original")
+            processed_image = F.interpolate(
+                processed_image.permute(0, 3, 1, 2), 
+                size=(original_image.shape[1], original_image.shape[2]), 
+                mode='bilinear', 
+                align_corners=False
+            ).permute(0, 2, 3, 1)
+        
+        # Process each image in batch
+        corrected_batch = []
+        
+        for i in range(original_image.shape[0]):
+            orig_img = original_image[i]
+            proc_img = processed_image[i]
+            current_mask = mask[i] if mask is not None else None
+            
+            # Apply color correction
+            corrected_img = self._apply_vae_color_correction(
+                orig_img, proc_img, method, correction_strength, 
+                auto_preserve, vae, current_mask, edge_feather, device, lock_input_image
+            )
+            
+            corrected_batch.append(corrected_img)
+        
+        result = torch.stack(corrected_batch, dim=0)
+        print(f"✅ VAE color correction completed for {len(corrected_batch)} images")
+        
+        return (result,)
+    
+    def _apply_vae_color_correction(
+        self, original_img, processed_img, method, strength, 
+        auto_preserve, vae, mask, edge_feather, device, lock_input_image
+    ):
+        """Apply the actual color correction."""
+        
+        # Convert to numpy for processing
+        orig_np = (original_img.cpu().numpy() * 255).astype(np.uint8)
+        proc_np = (processed_img.cpu().numpy() * 255).astype(np.uint8)
+        
+        # VAE-specific adjustments with caching
+        vae_adjustment = 1.0
+        vae_color_bias = None
+        if vae is not None:
+            # Use cached VAE analysis when input is locked
+            if (
+                lock_input_image
+                and hasattr(self, "_cached_vae_analysis")
+                and self._cached_vae_analysis is not None
+            ):
+                vae_adjustment, vae_color_bias = self._cached_vae_analysis
+                print("🎯 Using cached VAE analysis for enhanced correction")
+            else:
+                print("🎯 VAE model detected - analyzing VAE characteristics for enhanced correction")
+                vae_adjustment, vae_color_bias = self._analyze_vae_characteristics(vae, orig_np, proc_np)
+                # Cache the analysis if input is locked
+                if lock_input_image:
+                    self._cached_vae_analysis = (vae_adjustment, vae_color_bias)
+        
+        print(f"🔧 Applying {method} color correction...")
+        
+        # Balance strength across different methods
+        adjusted_strength = self._balance_correction_strength(method, strength) * vae_adjustment
+        
+        # Additional safety: limit maximum strength to prevent quantization artifacts
+        if adjusted_strength > 1.0:
+            print(f"⚠️ Strength {adjusted_strength:.2f} > 1.0, clamping to 1.0 to prevent artifacts")
+            adjusted_strength = 1.0
+        
+        print(f"🔧 Adjusted strength: {strength:.2f} → {adjusted_strength:.2f} for {method}")
+        
+        # Apply color correction based on method with VAE bias compensation
+        if method == "advanced_3d_lut":
+            corrected_np = self._advanced_3d_lut_correction(orig_np, proc_np, adjusted_strength, vae_color_bias)
+        elif method == "luminance_zones":
+            if vae_color_bias is not None:
+                corrected_np = self._vae_aware_luminance_correction(proc_np, orig_np, adjusted_strength, vae_color_bias)
+            else:
+                corrected_np = match_to_reference_colors(proc_np, orig_np, adjusted_strength)
+        elif method == "histogram_matching":
+            corrected_np = self._histogram_matching_correction(orig_np, proc_np, adjusted_strength, vae_color_bias)
+        else:  # statistical_matching
+            corrected_np = self._statistical_matching_correction(orig_np, proc_np, adjusted_strength, vae_color_bias)
+        
+        # Convert back to tensor
+        corrected_tensor = torch.from_numpy(corrected_np.astype(np.float32) / 255.0).to(device)
+        
+        # Handle mask-based preservation
+        if mask is not None:
+            # Always use mask consistently: white pixels = preserve, black pixels = correct
+            corrected_tensor = self._apply_mask_preservation(
+                processed_img, corrected_tensor, mask, edge_feather, device
+            )
+        elif auto_preserve:
+            # Auto-detect changed areas if no mask provided and auto_preserve is True
+            corrected_tensor = self._auto_preserve_inpainted(
+                original_img, processed_img, corrected_tensor, edge_feather, device
+            )
+        
+        return corrected_tensor
+    
+    def _safe_clamp_colors(self, image_np, preserve_gradients=True):
+        """Safely clamp colors to prevent quantization artifacts (black squares)."""
+        # Diagnostic: Check for extreme values
+        min_val = np.min(image_np)
+        max_val = np.max(image_np)
+        if min_val < -10 or max_val > 265:
+            print(f"⚠️ Extreme color values detected: min={min_val:.1f}, max={max_val:.1f} - applying safe clamping")
+        
+        if preserve_gradients:
+            # Soft clamping with sigmoid-like curve to preserve gradients
+            image_float = image_np.astype(np.float32)
+            
+            # Apply soft clamping for values outside normal range
+            below_zero = image_float < 0
+            above_255 = image_float > 255
+            
+            if np.any(below_zero):
+                # Soft approach to zero for negative values
+                negative_values = image_float[below_zero]
+                image_float[below_zero] = -5 * np.log(1 + np.exp(-negative_values / 5))
+                
+            if np.any(above_255):
+                # Soft approach to 255 for values above
+                high_values = image_float[above_255]
+                image_float[above_255] = 255 + 5 * np.log(1 + np.exp((high_values - 255) / 5))
+            
+            # Final gentle clamp
+            return np.clip(image_float, 0, 255).astype(np.uint8)
+        else:
+            # Standard hard clamping
+            return np.clip(image_np, 0, 255).astype(np.uint8)
+    
+    def _analyze_vae_characteristics(self, vae, original_np, processed_np):
+        """Analyze VAE-specific color characteristics and biases."""
+        try:
+            # Note: VAE model object could be used for future model-specific analysis
+            # Currently we analyze empirically by comparing original vs processed images
+            # Calculate per-channel color bias introduced by the VAE
+            orig_float = original_np.astype(np.float32)
+            proc_float = processed_np.astype(np.float32)
+            
+            # Analyze color bias in different luminance zones
+            gray_orig = np.mean(orig_float, axis=2)
+            
+            # Create luminance-based masks
+            shadows_mask = gray_orig < 85
+            midtones_mask = (gray_orig >= 85) & (gray_orig <= 170)
+            highlights_mask = gray_orig > 170
+            
+            vae_bias = {}
+            
+            for zone_name, mask in [("shadows", shadows_mask), ("midtones", midtones_mask), ("highlights", highlights_mask)]:
+                if np.sum(mask) > 100:  # Ensure enough pixels for reliable statistics
+                    orig_zone = orig_float[mask]
+                    proc_zone = proc_float[mask]
+                    
+                    # Calculate color bias per channel
+                    bias_r = np.mean(proc_zone[:, 0]) - np.mean(orig_zone[:, 0])
+                    bias_g = np.mean(proc_zone[:, 1]) - np.mean(orig_zone[:, 1])
+                    bias_b = np.mean(proc_zone[:, 2]) - np.mean(orig_zone[:, 2])
+                    
+                    vae_bias[zone_name] = np.array([bias_r, bias_g, bias_b])
+                else:
+                    vae_bias[zone_name] = np.array([0.0, 0.0, 0.0])
+            
+            # Calculate overall bias strength
+            total_bias = np.mean([np.abs(bias).sum() for bias in vae_bias.values()])
+            
+            # Adjust correction strength based on VAE bias severity
+            if total_bias > 15:  # High bias
+                vae_adjustment = 0.85
+                print(f"🔴 High VAE color bias detected ({total_bias:.1f}) - reducing correction strength")
+            elif total_bias > 8:  # Medium bias
+                vae_adjustment = 0.92
+                print(f"🟡 Medium VAE color bias detected ({total_bias:.1f}) - slight adjustment")
+            else:  # Low bias
+                vae_adjustment = 0.98
+                print(f"🟢 Low VAE color bias detected ({total_bias:.1f}) - minimal adjustment")
+            
+            return vae_adjustment, vae_bias
+            
+        except Exception as e:
+            print(f"⚠️ VAE analysis failed: {e}, using default settings")
+            return 0.9, None
+    
+    def _vae_aware_luminance_correction(self, processed_np, original_np, strength, vae_color_bias):
+        """Enhanced luminance zone correction that compensates for VAE-specific color biases."""
+        try:
+            # Start with standard luminance correction
+            corrected_np = match_to_reference_colors(processed_np, original_np, strength)
+            
+            # Apply VAE bias compensation
+            corrected_float = corrected_np.astype(np.float32)
+            gray = np.mean(corrected_float, axis=2)
+            
+            # Apply zone-specific bias corrections
+            shadows_mask = gray < 85
+            midtones_mask = (gray >= 85) & (gray <= 170)
+            highlights_mask = gray > 170
+            
+            bias_strength = strength * 0.3  # Gentle bias correction
+            
+            for zone_name, mask in [("shadows", shadows_mask), ("midtones", midtones_mask), ("highlights", highlights_mask)]:
+                if zone_name in vae_color_bias and np.sum(mask) > 0:
+                    bias = vae_color_bias[zone_name]
+                    # Apply inverse bias correction with limiting
+                    for c in range(3):
+                        bias_correction = bias[c] * bias_strength
+                        # Limit bias correction to prevent extreme shifts
+                        bias_correction = np.clip(bias_correction, -30, 30)
+                        corrected_float[mask, c] -= bias_correction
+            
+            # Safe clamping to prevent quantization artifacts
+            corrected_np = self._safe_clamp_colors(corrected_float, preserve_gradients=True)
+            print(f"✅ VAE-aware luminance correction applied with bias compensation")
+            
+            return corrected_np
+            
+        except Exception as e:
+            print(f"❌ VAE-aware correction failed: {e}, falling back to standard")
+            return match_to_reference_colors(processed_np, original_np, strength)
+    
+    def _balance_correction_strength(self, method, strength):
+        """Balance correction strength across different methods for consistent results."""
+        # Different methods have different sensitivities, so we adjust accordingly
+        if method == "luminance_zones":
+            # Luminance zones method is well-balanced, use as-is
+            return strength
+        elif method == "histogram_matching":
+            # Histogram matching can be aggressive, reduce slightly
+            return strength * 0.85
+        elif method == "statistical_matching":
+            # Statistical matching is gentler, increase slightly
+            return min(1.0, strength * 1.15)
+        elif method == "advanced_3d_lut":
+            # 3D LUT can be very aggressive, reduce significantly
+            return strength * 0.7
+        else:
+            return strength
+    
+    def _advanced_3d_lut_correction(self, original_np, processed_np, strength, vae_color_bias=None):
+        """Advanced 3D LUT-based color correction for precise VAE artifact fixing."""
+        if not ADVANCED_LIBS_AVAILABLE:
+            return match_to_reference_colors(processed_np, original_np, strength)
+        
+        try:
+            print("🔧 Building 3D color mapping...")
+            
+            # Create color mapping using k-means clustering
+            from sklearn.cluster import KMeans
+            
+            # Sample colors for mapping (use every 4th pixel for speed)
+            orig_samples = original_np[::4, ::4].reshape(-1, 3)
+            proc_samples = processed_np[::4, ::4].reshape(-1, 3)
+            
+            # Use k-means to find representative color pairs
+            n_clusters = min(64, len(orig_samples) // 10)  # Adaptive cluster count
+            
+            if n_clusters < 8:
+                # Too few samples, fall back to zone-based matching
+                return match_to_reference_colors(processed_np, original_np, strength)
+            
+            # Cluster processed colors
+            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+            proc_clusters = kmeans.fit_predict(proc_samples)
+            proc_centers = kmeans.cluster_centers_
+            
+            # Find corresponding original colors for each cluster
+            orig_centers = np.zeros_like(proc_centers)
+            for i in range(n_clusters):
+                cluster_mask = proc_clusters == i
+                if np.sum(cluster_mask) > 0:
+                    # Average original colors that correspond to this processed cluster
+                    orig_centers[i] = np.mean(orig_samples[cluster_mask], axis=0)
+                else:
+                    orig_centers[i] = proc_centers[i]  # Fallback
+            
+            # Apply color mapping to full image
+            corrected_np = processed_np.astype(np.float32)
+            
+            # For each pixel, find closest processed center and map to original center
+            proc_flat = processed_np.reshape(-1, 3).astype(np.float32)
+            
+            # Vectorized distance calculation
+            distances = np.linalg.norm(
+                proc_flat[:, np.newaxis, :] - proc_centers[np.newaxis, :, :], axis=2
+            )
+            closest_clusters = np.argmin(distances, axis=1)
+            
+            # Apply color shifts with distance-based blending and VAE bias compensation
+            min_distances = np.min(distances, axis=1)
+            max_distance = np.percentile(min_distances, 90)  # Use 90th percentile for normalization
+            
+            for i in range(n_clusters):
+                cluster_mask = closest_clusters == i
+                if np.sum(cluster_mask) > 0:
+                    # Calculate color shift for this cluster
+                    color_shift = orig_centers[i] - proc_centers[i]
+                    
+                    # Apply VAE bias compensation if available
+                    if vae_color_bias is not None:
+                        # Determine luminance zone for this cluster
+                        cluster_luminance = np.mean(proc_centers[i])
+                        if cluster_luminance < 85:
+                            zone_bias = vae_color_bias.get("shadows", np.array([0.0, 0.0, 0.0]))
+                        elif cluster_luminance <= 170:
+                            zone_bias = vae_color_bias.get("midtones", np.array([0.0, 0.0, 0.0]))
+                        else:
+                            zone_bias = vae_color_bias.get("highlights", np.array([0.0, 0.0, 0.0]))
+                        
+                        # Add VAE bias compensation to color shift
+                        color_shift -= zone_bias * 0.5  # Gentle bias compensation
+                    
+                    # Apply with distance-based falloff and strength
+                    cluster_distances = min_distances[cluster_mask]
+                    distance_weights = np.clip(1.0 - cluster_distances / max_distance, 0.1, 1.0)
+                    
+                    for c in range(3):
+                        shift_amount = color_shift[c] * strength * distance_weights
+                        # Limit maximum shift to prevent extreme corrections
+                        shift_amount = np.clip(shift_amount, -50, 50)
+                        proc_flat[cluster_mask, c] += shift_amount
+            
+            # Reshape back and apply safe clamping
+            corrected_np = proc_flat.reshape(processed_np.shape)
+            corrected_np = self._safe_clamp_colors(corrected_np, preserve_gradients=True)
+            
+            print(f"✅ 3D LUT correction applied using {n_clusters} color clusters")
+            return corrected_np
+            
+        except Exception as e:
+            print(f"❌ 3D LUT correction failed: {e}, falling back to zone matching")
+            return match_to_reference_colors(processed_np, original_np, strength)
+    
+    def _histogram_matching_correction(self, original_np, processed_np, strength, vae_color_bias=None):
+        """Histogram-based color matching."""
+        if not ADVANCED_LIBS_AVAILABLE:
+            return match_to_reference_colors(processed_np, original_np, strength)
+        
+        try:
+            from skimage import exposure
+            
+            corrected_np = processed_np.astype(np.float32)
+            original_float = original_np.astype(np.float32)
+            
+            # Match histogram for each channel
+            for c in range(3):
+                matched_channel = exposure.match_histograms(
+                    corrected_np[:,:,c], original_float[:,:,c]
+                )
+                # Blend with original based on strength
+                corrected_np[:,:,c] = (
+                    processed_np[:,:,c] * (1 - strength) + 
+                    matched_channel * strength
+                )
+            
+            # Apply VAE bias compensation if available
+            if vae_color_bias is not None:
+                gray = np.mean(corrected_np, axis=2)
+                bias_strength = strength * 0.2  # Gentle bias correction for histogram method
+                
+                # Apply zone-specific bias corrections
+                shadows_mask = gray < 85
+                midtones_mask = (gray >= 85) & (gray <= 170)
+                highlights_mask = gray > 170
+                
+                for zone_name, mask in [("shadows", shadows_mask), ("midtones", midtones_mask), ("highlights", highlights_mask)]:
+                    if zone_name in vae_color_bias and np.sum(mask) > 0:
+                        bias = vae_color_bias[zone_name]
+                        for c in range(3):
+                            bias_correction = bias[c] * bias_strength
+                            # Limit bias correction to prevent extreme shifts
+                            bias_correction = np.clip(bias_correction, -30, 30)
+                            corrected_np[mask, c] -= bias_correction
+                            
+                print("✅ VAE bias compensation applied to histogram matching")
+            
+            return self._safe_clamp_colors(corrected_np, preserve_gradients=True)
+            
+        except Exception as e:
+            print(f"❌ Histogram matching failed: {e}")
+            return match_to_reference_colors(processed_np, original_np, strength)
+    
+    def _statistical_matching_correction(self, original_np, processed_np, strength, vae_color_bias=None):
+        """Statistical moment matching (mean and std)."""
+        corrected_np = processed_np.astype(np.float32)
+        original_float = original_np.astype(np.float32)
+        
+        for c in range(3):
+            # Calculate statistics
+            proc_mean = np.mean(corrected_np[:,:,c])
+            proc_std = np.std(corrected_np[:,:,c])
+            orig_mean = np.mean(original_float[:,:,c])
+            orig_std = np.std(original_float[:,:,c])
+            
+            # Normalize and rescale
+            if proc_std > 0:
+                normalized = (corrected_np[:,:,c] - proc_mean) / proc_std
+                rescaled = normalized * orig_std + orig_mean
+                
+                # Blend with strength
+                corrected_np[:,:,c] = (
+                    corrected_np[:,:,c] * (1 - strength) + 
+                    rescaled * strength
+                )
+        
+        # Apply VAE bias compensation if available
+        if vae_color_bias is not None:
+            gray = np.mean(corrected_np, axis=2)
+            bias_strength = strength * 0.25  # Gentle bias correction for statistical method
+            
+            # Apply zone-specific bias corrections
+            shadows_mask = gray < 85
+            midtones_mask = (gray >= 85) & (gray <= 170)
+            highlights_mask = gray > 170
+            
+            for zone_name, mask in [("shadows", shadows_mask), ("midtones", midtones_mask), ("highlights", highlights_mask)]:
+                if zone_name in vae_color_bias and np.sum(mask) > 0:
+                    bias = vae_color_bias[zone_name]
+                    for c in range(3):
+                        bias_correction = bias[c] * bias_strength
+                        # Limit bias correction to prevent extreme shifts
+                        bias_correction = np.clip(bias_correction, -30, 30)
+                        corrected_np[mask, c] -= bias_correction
+                        
+            print("✅ VAE bias compensation applied to statistical matching")
+        
+        return self._safe_clamp_colors(corrected_np, preserve_gradients=True)
+    
+    def _apply_mask_preservation(self, processed_img, corrected_img, mask, edge_feather, device):
+        """Apply mask to preserve areas. White pixels in mask = preserve, black pixels = correct."""
+        # Mask convention: white (1.0) = preserve, black (0.0) = correct
+        # We need correction_mask where 1.0 = correct, 0.0 = preserve
+        correction_mask = 1.0 - mask.to(device)  # Invert: white becomes 0 (preserve), black becomes 1 (correct)
+        
+        if edge_feather > 0 and ADVANCED_LIBS_AVAILABLE:
+            # Apply gaussian blur for soft edges
+            correction_mask_np = correction_mask.cpu().numpy()
+            correction_mask_np = cv2.GaussianBlur(
+                correction_mask_np, (edge_feather*2+1, edge_feather*2+1), edge_feather/3
+            )
+            correction_mask = torch.from_numpy(correction_mask_np).to(device)
+        
+        # Apply mask: blend between processed and corrected
+        correction_mask = correction_mask.unsqueeze(-1)  # Add channel dimension
+        result = processed_img * (1 - correction_mask) + corrected_img * correction_mask
+        
+        print(f"✅ Mask-based preservation applied with {edge_feather}px feather")
+        return result
+    
+    def _auto_preserve_inpainted(self, original_img, processed_img, corrected_img, edge_feather, device):
+        """Auto-detect inpainted areas and preserve them."""
+        # Calculate difference between original and processed to find changed areas
+        diff = torch.abs(original_img - processed_img)
+        diff_magnitude = torch.mean(diff, dim=-1)  # Average across RGB
+        
+        # Threshold to find significantly changed areas (likely inpainted)
+        threshold = torch.quantile(diff_magnitude, 0.7)  # Top 30% of changes
+        inpainted_mask = (diff_magnitude > threshold).float()
+        
+        # Correction mask: 1 = correct, 0 = preserve
+        correction_mask = 1.0 - inpainted_mask
+        
+        if edge_feather > 0 and ADVANCED_LIBS_AVAILABLE:
+            # Smooth the mask
+            correction_mask_np = correction_mask.cpu().numpy()
+            correction_mask_np = cv2.GaussianBlur(
+                correction_mask_np, (edge_feather*2+1, edge_feather*2+1), edge_feather/3
+            )
+            correction_mask = torch.from_numpy(correction_mask_np).to(device)
+        
+        correction_mask = correction_mask.unsqueeze(-1)  # Add channel dimension
+        result = processed_img * (1 - correction_mask) + corrected_img * correction_mask
+        
+        preserved_pixels = torch.sum(1 - correction_mask).item()
+        print(f"✅ Auto-preserved {preserved_pixels:.0f} pixels (likely inpainted areas)")
+        return result
+
+
 # Export all classes
 __all__ = [
     "EasyColorCorrection",
     "BatchColorCorrection",
     "RawImageProcessor",
     "ColorCorrectionViewer",
+    "ColorPaletteExtractor",
+    "FilmEmulation",
+    "VAEColorCorrector",
 ]

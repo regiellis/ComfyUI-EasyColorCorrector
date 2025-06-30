@@ -307,6 +307,14 @@ app.registerExtension({
                     vegetation_green: node.widgets.find(w => w.name === "vegetation_green"),
                     sepia_tone: node.widgets.find(w => w.name === "sepia_tone"),
                     colorize_mode: node.widgets.find(w => w.name === "colorize_mode"),
+                    // Semantic Selective Color widgets
+                    skin_tone_adjustment: node.widgets.find(w => w.name === "skin_tone_adjustment"),
+                    sky_adjustment: node.widgets.find(w => w.name === "sky_adjustment"),
+                    foliage_adjustment: node.widgets.find(w => w.name === "foliage_adjustment"),
+                    selective_hue_shift: node.widgets.find(w => w.name === "selective_hue_shift"),
+                    selective_saturation: node.widgets.find(w => w.name === "selective_saturation"),
+                    selective_strength: node.widgets.find(w => w.name === "selective_strength"),
+                    force_colorize: node.widgets.find(w => w.name === "force_colorize"),
                     use_gpu: node.widgets.find(w => w.name === "use_gpu"),
                 };
 
@@ -322,8 +330,8 @@ app.registerExtension({
                 const visibilityConfig = {
                     "Auto": ["reference_strength", "extract_palette", "lock_input_image", "ai_analysis", "adjust_for_skin_tone", "white_balance_strength", "enhancement_strength", "pop_factor", "effect_strength", "use_gpu"],
                     "Preset": ["reference_strength", "extract_palette", "lock_input_image", "ai_analysis", "adjust_for_skin_tone", "white_balance_strength", "enhancement_strength", "preset", "variation", "effect_strength", "use_gpu"],
-                    "Manual": ["reference_strength", "extract_palette", "lock_input_image", "ai_analysis", "adjust_for_skin_tone", "white_balance_strength", "enhancement_strength", "warmth", "vibrancy", "contrast", "brightness", "tint", "lift", "gamma", "gain", "noise", "effect_strength", "use_gpu"],
-                    "Colorize": ["reference_strength", "extract_palette", "lock_input_image", "ai_analysis", "adjust_for_skin_tone", "colorize_strength", "skin_warmth", "sky_saturation", "vegetation_green", "sepia_tone", "colorize_mode", "effect_strength", "use_gpu"],
+                    "Manual": ["reference_strength", "extract_palette", "lock_input_image", "ai_analysis", "adjust_for_skin_tone", "white_balance_strength", "enhancement_strength", "warmth", "vibrancy", "contrast", "brightness", "tint", "lift", "gamma", "gain", "noise", "skin_tone_adjustment", "sky_adjustment", "foliage_adjustment", "selective_hue_shift", "selective_saturation", "selective_strength", "effect_strength", "use_gpu"],
+                    "Colorize": ["reference_strength", "extract_palette", "lock_input_image", "ai_analysis", "adjust_for_skin_tone", "colorize_strength", "skin_warmth", "sky_saturation", "vegetation_green", "sepia_tone", "colorize_mode", "force_colorize", "effect_strength", "use_gpu"],
                 };
 
                 // Real-time preview functionality

@@ -1,6 +1,6 @@
 import os
 
-from .src import EasyColorCorrection, BatchColorCorrection, RawImageProcessor, ColorCorrectionViewer, ColorPaletteExtractor
+from .src import EasyColorCorrection, BatchColorCorrection, RawImageProcessor, ColorCorrectionViewer, ColorPaletteExtractor, FilmEmulation, VAEColorCorrector
 
 WEB_DIRECTORY = os.path.join(os.path.dirname(__file__), "js")
 CSS_DIRECTORY = os.path.join(os.path.dirname(__file__), "css")
@@ -11,6 +11,8 @@ NODE_CLASS_MAPPINGS = {
     "RawImageProcessor": RawImageProcessor,
     "ColorCorrectionViewer": ColorCorrectionViewer,
     "ColorPaletteExtractor": ColorPaletteExtractor,
+    "FilmEmulation": FilmEmulation,
+    "VAEColorCorrector": VAEColorCorrector,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "EasyColorCorrection": "Color Corrector",
@@ -18,6 +20,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RawImageProcessor": "RAW Image Processor (beta)",
     "ColorCorrectionViewer": "Color Correction Viewer (beta)",
     "ColorPaletteExtractor": "Color Palette Extractor",
+    "FilmEmulation": "Film Emulation",
+    "VAEColorCorrector": "VAE Color Corrector",
 }
 
 __all__ = [
