@@ -28,12 +28,15 @@
 - **2-Axis Color Control**: Separate temperature and tint like the pros use
 - **Working 3-Way Correction**: Lift/Gamma/Gain actually works now
 
-### 🆕 **New Nodes (Beta)**
-- **Batch Color Corrector**: Process entire video sequences with the same AI-powered corrections
+### 🆕 **New Nodes**
+- **VAE Color Corrector**: Fix VAE-induced color shifts in inpainting/img2img workflows with advanced bias analysis
+- **Batch Color Corrector**: Process entire video sequences with the same AI-powered corrections  
 - **RAW Image Processor**: Direct RAW file processing with professional color science
 - **Color Corrector Viewer**: Real-time preview and analysis for video workflows
+- **Color Palette Extractor**: Standalone palette extraction for reference workflows
+- **Film Emulation**: Professional film stock emulation with highlight rolloff
 
-> The main Color Corrector is now professional-grade and rock solid. The new nodes are experimental playgrounds for advanced workflows.
+> The main Color Corrector is professional-grade and rock solid. The specialized nodes target specific workflows and advanced use cases.
 
 ---
 
@@ -150,6 +153,60 @@ Professional-grade tools with pure manual control:
 
 ---
 
+## 🔧 VAE Color Corrector
+
+### **Fix VAE-Induced Color Shifts in Inpainting Workflows**
+
+A specialized node designed to solve a common ComfyUI problem: when images go through VAE encoding/decoding (especially in inpainting workflows), they often develop noticeable color shifts compared to the original input.
+
+### ✨ **Key Features**
+
+- **Four Correction Methods**:
+  - **Luminance Zones**: Professional shadows/midtones/highlights correction (recommended)
+  - **Histogram Matching**: Match color distributions between original and processed
+  - **Statistical Matching**: Align color statistics (mean/std) across channels
+  - **Advanced 3D LUT**: Precise 3D color mapping using k-means clustering
+
+- **VAE-Aware Analysis**: 
+  - Analyzes color bias patterns across luminance zones
+  - Detects high/medium/low VAE color bias automatically
+  - Applies intelligent strength adjustments based on bias severity
+
+- **Smart Preservation**:
+  - **Auto-detect**: Automatically identifies and preserves inpainted areas
+  - **Mask-based**: Use custom masks (white=preserve, black=correct)
+  - **Edge feathering**: Smooth transitions between corrected/preserved areas
+
+- **Performance Features**:
+  - **Lock Input**: Prevents upstream reprocessing when adjusting parameters
+  - **Smart Caching**: Preserves expensive VAE analysis between adjustments
+  - **Safe Color Clamping**: Prevents quantization artifacts (black squares)
+
+### 🎯 **Perfect For**
+
+- **Inpainting workflows** where color shifts occur after VAE processing
+- **Img2img workflows** with noticeable color deviations
+- **Batch processing** with consistent VAE color correction
+- **Professional workflows** requiring precise color matching
+
+### 🚀 **Usage**
+
+1. Connect **original image** (before VAE encoding)
+2. Connect **processed image** (after VAE decoding)  
+3. Choose correction method (start with "luminance_zones")
+4. Adjust **correction strength** (0.8 is usually good)
+5. Enable **lock_input_image** for real-time parameter tuning
+
+```
+Original Image → VAE Encode → [Inpainting/Processing] → VAE Decode → Processed Image
+     ↓                                                                    ↓
+     └──────────────────── VAE Color Corrector ←─────────────────────────┘
+                                    ↓
+                            Color-Corrected Result
+```
+
+---
+
 ## 📊 Visual Outputs & Analysis
 
 ### 🖼️ **Four Output Types**
@@ -201,15 +258,19 @@ pip install -r requirements.txt
 ```bash
 pip install \
     "torch>=1.12.0" \
-    "numpy>=1.21.0 \
+    "numpy>=1.21.0" \
     "opencv-python>=4.8.0" \
     "scikit-learn>=1.3.0" \
     "scikit-image>=0.21.0" \
     "colour-science>=0.4.3" \
     "scipy>=1.11.0" \
     "rawpy>=0.18.0" \
-    "imageio>=2.28.0"\
-    "OpenEXR>=1.3.9"
+    "imageio>=2.28.0" \
+    "OpenEXR>=1.3.9" \
+    "Pillow>=9.0.0" \
+    "torchvision>=0.13.0" \
+    "huggingface_hub>=0.15.0" \
+    "timm>=0.9.2"
 ```
 
 3. Restart ComfyUI
@@ -222,6 +283,7 @@ pip install \
 
 ### Basic Workflow
 
+#### **Main Color Corrector**
 1. Add **"Easy Color Corrector"** node to your workflow
 2. Connect an image input
 3. Choose your mode:
@@ -233,6 +295,13 @@ pip install \
    - **Histogram output** → Preview Image (to see RGB analysis)
    - **Palette output** → Preview Image (to see color swatches)
    - **Palette data** → Text nodes or other color-aware nodes
+
+#### **VAE Color Corrector** 
+1. Add **"VAE Color Corrector"** node to your workflow
+2. Connect **original image** (before VAE) and **processed image** (after VAE)
+3. Choose correction method (start with "luminance_zones")
+4. Adjust correction strength (0.8 recommended)
+5. Optionally provide a mask or enable auto-preserve for inpainted areas
 
 ### 📊 **Enabling Visual Analysis**
 
@@ -385,6 +454,15 @@ A: Yes! MIT license means you can use it however you want.
 
 **Q: Why is it called "Easy" when it's so advanced?**  
 A: Because the AI makes professional color grading *easy*. The complexity is hidden behind intelligent automation.
+
+**Q: What's the difference between the main node and VAE Color Corrector?**  
+A: The main node is for general color correction and enhancement. VAE Color Corrector specifically fixes color shifts that occur when images go through VAE encoding/decoding in ComfyUI workflows.
+
+**Q: When should I use the VAE Color Corrector?**  
+A: Use it when you notice color shifts after inpainting, img2img, or any workflow where images pass through a VAE. Connect the original (pre-VAE) and processed (post-VAE) images.
+
+**Q: Why am I getting black squares in my images?**  
+A: This was a quantization artifact issue that's now fixed with safe color clamping. Update to the latest version for the fix.
 
 ---
 
